@@ -1,0 +1,7 @@
+FROM python:3.12-slim
+WORKDIR /app
+ENV PYTHONUNBUFFERED=1 NDN_CLIENT_TRANSPORT=unix:///run/nfd.sock
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY seed ./seed
+ENTRYPOINT ["python", "-m", "seed"]

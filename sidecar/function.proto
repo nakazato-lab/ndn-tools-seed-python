@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package function;
+
+service FunctionRuntime {
+  rpc ExecuteFunction (FunctionRequest) returns (FunctionResponse);
+  rpc DeployFunction (DeployRequest) returns (DeployResponse);
+}
+
+message DeployRequest {
+  string code_content = 1;
+}
+
+message DeployResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message FunctionRequest {
+  string name = 1;
+  repeated string args = 2;
+}
+
+message FunctionResponse {
+  string result = 1;
+}

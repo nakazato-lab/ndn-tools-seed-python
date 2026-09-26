@@ -1,0 +1,24 @@
+# Dockerfile.nfd
+FROM ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 1. NFDのインストール (PPAを使用することでビルド時間を大幅短縮)
+RUN apt-get update && apt-get install -y software-properties-common curl \
+    && add-apt-repository ppa:named-data/ppa \
+    && apt-get update && apt-get install -y nfd \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. NFDのデフォルト設定ファイルを生成し、ソケットパスを調整
+# K8sで共有しやすいように /run/nfd.sock に直接作成するように書き換えます
+# localhop_security と auto_prefix_propagate は同時に有効化できないため、後者を削除します
+RUN cp /etc/ndn/nfd.conf.sample /etc/ndn/nfd.conf && \
+    sed -i 's|path /run/nfd/nfd.sock|path /run/nfd.sock|g' /etc/ndn/nfd.conf && \
+    sed -i '/^[[:space:]]*auto_prefix_propagate[[:space:]]*$/,/^[[:space:]]*}[[:space:]]*$/d' /etc/ndn/nfd.conf && \
+    sed -i '/^[[:space:]]*localhost_security[[:space:]]*$/i \  localhop_security\n  {\n    trust-anchor\n    {\n      type any\n    }\n  }' /etc/ndn/nfd.conf && \
+    sed -i 's/default_level INFO/default_level DEBUG/g' /etc/ndn/nfd.conf
+
+# Dockerのcapability bounding set外のfile capabilityによるexec失敗を防ぐ
+RUN setcap -r /usr/bin/nfd
+
+# 3. NFDの起動
+CMD ["nfd", "--config", "/etc/ndn/nfd.conf"]

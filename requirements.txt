@@ -1,0 +1,2 @@
+python-ndn==0.5.1
+kubernetes==36.0.3
