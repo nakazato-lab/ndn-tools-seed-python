@@ -1,0 +1,4 @@
+grpcio>=1.71.0
+protobuf
+# ndnc 0.0.6 requires lark==1.1.9.
+ndnc==0.0.6

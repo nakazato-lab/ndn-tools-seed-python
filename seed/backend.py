@@ -13,10 +13,11 @@ def resource_name(prefix):
 
 
 class KubernetesBackend:
-    def __init__(self, namespace, node_name, image, api=None, transport=None):
+    def __init__(self, namespace, node_name, function_image, sidecar_image, api=None, transport=None):
         self.namespace = namespace
         self.node_name = node_name
-        self.image = image
+        self.function_image = function_image
+        self.sidecar_image = sidecar_image
         self.transport = transport or os.getenv("NDN_CLIENT_TRANSPORT", "unix:///run/nfd.sock")
         if api is None:
             try:
@@ -43,11 +44,11 @@ class KubernetesBackend:
         spec = {
             'restartPolicy': 'Never',
             'containers': [
-                {'name': 'function', 'image': self.image,
+                {'name': 'function', 'image': self.function_image,
                  'command': ['python3', 'interpreter_server.py', '50051'],
                  'env': [{'name': 'NDN_CLIENT_TRANSPORT', 'value': self.transport}],
                  'volumeMounts': mounts.copy()},
-                {'name': 'sidecar', 'image': self.image,
+                {'name': 'sidecar', 'image': self.sidecar_image,
                  'command': ['/bin/bash', '-ec'],
                  'args': ['python3 deploy.py 50051 /app/func.py; exec python3 main.py "$1" "$2"',
                           'seed-sidecar', prefix, self.namespace],

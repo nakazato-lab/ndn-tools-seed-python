@@ -36,7 +36,12 @@ def arguments():
     parser.add_argument('--node-name', default=os.getenv('NODE_NAME'))
     parser.add_argument('-n', '--namespace', default=os.getenv('POD_NAMESPACE', 'default'))
     parser.add_argument('--transport', default=os.getenv('NDN_CLIENT_TRANSPORT', 'unix:///run/nfd.sock'))
-    parser.add_argument('--function-image', default=os.getenv('FUNCTION_IMAGE', 'ghcr.io/nakazato-lab/ndn-tools-seed-python/my-edge-function:latest'))
+    parser.add_argument('--function-image', default=os.getenv(
+        'FUNCTION_IMAGE',
+        'ghcr.io/nakazato-lab/ndn-tools-seed-python/ndn-function-runtime:latest'))
+    parser.add_argument('--sidecar-image', default=os.getenv(
+        'SIDECAR_IMAGE',
+        'ghcr.io/nakazato-lab/ndn-tools-seed-python/ndn-function-sidecar:latest'))
     parser.add_argument('-f', '--freshness', type=int, default=0)
     parser.add_argument('-F', '--final', action='store_true')
     parser.add_argument('-w', '--timeout', type=int, help='execution timeout after registration, milliseconds')
@@ -54,7 +59,9 @@ def arguments():
 
 
 async def run(args):
-    backend = KubernetesBackend(args.namespace, args.node_name, args.function_image, transport=args.transport)
+    backend = KubernetesBackend(
+        args.namespace, args.node_name, args.function_image, args.sidecar_image,
+        transport=args.transport)
     app = NDNApp(face=make_face(args.transport), keychain=KeychainDigest())
     server = SeedServer(app, backend, args.name, args.freshness, args.final)
     loop = asyncio.get_running_loop()
