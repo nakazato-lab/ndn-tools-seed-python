@@ -53,9 +53,9 @@ KubernetesのDaemonSetやRBACなどの定義は`k8s-manifest`で管理します�
 {"type":"CREATE","name":"/demo/function/func1","content":"def handle(args):\n    return '-'.join(args)","content_type":"ndn"}
 ```
 
-`content_type`はC++版と同じく無視します。**contentはPythonの`handle(args)`を定義する
-ソースコードです。** 登録側サンプルの`let avg = ...`という独自.ndn言語は実行できません。
-構文とhandle定義を検査し、無効なコードには`Error:`で始まるDataを返します。
+`content_type`はC++版と同じく無視します。Seedは`content`が文字列であることだけを確認し、
+構文や`handle`定義を検査せず、そのまま実行用Podへ渡します。`.ndn`も受け渡しできます。
+同梱の実行サーバーは現在Python専用で、`.ndn`の実行対応は別途必要です。
 CREATE成功応答はKubernetes APIでのリソース作成完了であり、Pod Readyや関数実行の成功保証ではありません。
 
 DELETEは`{"type":"DELETE","name":"/demo/function/func1"}`、一覧取得はapp_paramなしです。

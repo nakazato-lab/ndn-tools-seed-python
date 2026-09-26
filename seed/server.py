@@ -1,4 +1,3 @@
-import ast
 import asyncio
 import json
 import logging
@@ -23,12 +22,9 @@ def parse_request(raw):
     if doc['type'] == 'CREATE':
         code = doc.get('content')
         if not isinstance(code, str):
-            raise ValueError('content must be a Python source string')
-        # content_type is deliberately ignored for compatibility with Manager's
-        # default "ndn". The existing runtime only understands Python handle(args).
-        tree = ast.parse(code)
-        if not any(isinstance(n, ast.FunctionDef) and n.name == 'handle' for n in tree.body):
-            raise ValueError('content must define a Python handle(args) function')
+            raise ValueError('content must be a string')
+        # Pass source text through unchanged; language validation belongs to
+        # the function runtime. content_type is ignored, as in the C++ Seed.
     return doc['type'], name, doc.get('content')
 
 
@@ -65,6 +61,7 @@ class SeedServer:
                 if app_param is not None:
                     operation, prefix, code = parse_request(app_param)
                     if operation == 'CREATE':
+                        LOG.info('Received function: %s\n%s', prefix, code)
                         await asyncio.to_thread(self.backend.create, prefix, code)
                         self.active.add(prefix)
                     else:
