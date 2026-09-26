@@ -9,7 +9,7 @@ from kubernetes.client.exceptions import ApiException
 
 def resource_name(prefix):
     slug = re.sub(r'[^a-z0-9-]+', '-', prefix.lower()).strip('-')[:40] or 'function'
-    return f"seed-{slug}-{hashlib.sha256(prefix.encode()).hexdigest()[:12]}"
+    return f"func-{slug}-{hashlib.sha256(prefix.encode()).hexdigest()[:12]}"
 
 
 class KubernetesBackend:
