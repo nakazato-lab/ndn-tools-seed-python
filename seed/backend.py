@@ -2,6 +2,7 @@
 import hashlib
 import os
 import re
+import time
 
 from kubernetes import client, config
 from kubernetes.client.exceptions import ApiException
@@ -27,14 +28,50 @@ class KubernetesBackend:
             api = client.CoreV1Api()
         self.api = api
 
+    def _wait_until_deleted(self, read, name, kind):
+        """Wait until Kubernetes returns 404 for a resource."""
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                read(name, self.namespace, _request_timeout=10)
+            except ApiException as exc:
+                if exc.status == 404:
+                    return
+                raise
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f'{kind} {name} was not deleted within 30 seconds')
+            time.sleep(0.25)
+
+    def _delete_existing(self, name):
+        """Delete the existing function Pod and ConfigMap, when present."""
+        # Delete the existing function Pod before recreating it.
+        try:
+            self.api.delete_namespaced_pod(name, self.namespace, _request_timeout=10)
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+        else:
+            self._wait_until_deleted(self.api.read_namespaced_pod, name, 'Pod')
+
+        try:
+            self.api.delete_namespaced_config_map(name, self.namespace, _request_timeout=10)
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+        else:
+            self._wait_until_deleted(
+                self.api.read_namespaced_config_map, name, 'ConfigMap')
+
     def create(self, prefix, code):
+        # Pod and ConfigMap use the same Kubernetes resource name.
         name = resource_name(prefix)
         metadata = {
             'name': name,
             'labels': {'app': 'edge-function', 'managed-by': 'ndn-seed-python'},
             'annotations': {'ndn-prefix': prefix},
         }
-        # Do not silently overwrite a running function. DELETE first to replace it.
+        # CREATE replaces a prior deployment of the same NDN prefix.
+        self._delete_existing(name)
         self.api.create_namespaced_config_map(self.namespace, {
             'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': metadata,
             'data': {'func.py': code},
