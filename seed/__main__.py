@@ -36,7 +36,7 @@ def arguments():
     parser.add_argument('--node-name', default=os.getenv('NODE_NAME'))
     parser.add_argument('-n', '--namespace', default=os.getenv('POD_NAMESPACE', 'default'))
     parser.add_argument('--transport', default=os.getenv('NDN_CLIENT_TRANSPORT', 'unix:///run/nfd.sock'))
-    parser.add_argument('--function-image', default=os.getenv('FUNCTION_IMAGE', 'ryotaroiwata/my-edge-function:latest'))
+    parser.add_argument('--function-image', default=os.getenv('FUNCTION_IMAGE', 'ghcr.io/nakazato-lab/ndn-tools-seed-python/my-edge-function:latest'))
     parser.add_argument('-f', '--freshness', type=int, default=0)
     parser.add_argument('-F', '--final', action='store_true')
     parser.add_argument('-w', '--timeout', type=int, help='execution timeout after registration, milliseconds')

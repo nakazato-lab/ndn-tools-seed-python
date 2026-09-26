@@ -36,7 +36,7 @@ Kubernetesのin-cluster認証、またはローカルkubeconfigを利用しま�
 `NODE_NAME`から`/{node_name}/seed`を登録し、作成するPodもそのノードに固定します。
 `SEED_PREFIX`または位置引数でプレフィックスを変更できます。
 `POD_NAMESPACE`は既定で`default`、`FUNCTION_IMAGE`は既定で
-`ryotaroiwata/my-edge-function:latest`です。自分の公開先に変更してください。
+`ghcr.io/nakazato-lab/ndn-tools-seed-python/my-edge-function:latest`です。自分の公開先に変更してください。
 
 KubernetesのDaemonSetやRBACなどの定義は`k8s-manifest`で管理します。
 各ノードでNFDが起動し、ホストの`/var/run/nfd-k8s/nfd.sock`が利用できる構成を前提とします。
@@ -83,8 +83,20 @@ docker build -t my-edge-function sidecar
 ```
 
 `.github/workflows/docker-push.yaml`はmainへのpushまたは手動実行で3イメージを公開します。
-必要なGitHub Secretsは既存と同じ`DOCKER_HUB_USER`と`DOCKER_HUB_ACCESS_TOKEN`です。
-公開名は`<user>/ndn-seed:latest`、`<user>/ndn-nfd:latest`、`<user>/my-edge-function:latest`。
+公開先はGitHub Container Registry（GHCR）です。`github.actor`と自動発行される
+`GITHUB_TOKEN`で認証し、Workflowに`packages: write`権限を付与しています。
+Docker Hub用Secretsの設定は不要です。
+
+タグ形式は`ghcr.io/<owner>/<repository>/<image>:latest`で、現在の公開先は以下です。
+
+- `ghcr.io/nakazato-lab/ndn-tools-seed-python/ndn-nfd:latest`
+- `ghcr.io/nakazato-lab/ndn-tools-seed-python/ndn-seed:latest`
+- `ghcr.io/nakazato-lab/ndn-tools-seed-python/my-edge-function:latest`
+
+`k8s-manifest`側のイメージ参照と、`FUNCTION_IMAGE`を明示している場合はその値も
+上記のGHCRパスに揃えてください。
+認証方式は[GitHub公式ドキュメント](https://docs.github.com/en/actions/tutorials/publish-packages/publish-docker-images#publishing-images-to-github-packages)に従っています。
+
 PRではビルドのみ実行します。今回、実際のpushは行っていません。
 
 
