@@ -1,7 +1,7 @@
 # ndn-tools-seed-python
 
 `ndn-tools-seed/tools/seed/server` のPython移植です。ManagerからNDN Interestで
-Pythonコードを受け取り、KubernetesのConfigMapと関数実行Podを作成・削除します。
+関数コードを受け取り、KubernetesのConfigMapと関数実行Podを作成・削除します。
 元の `.github/workflows/docker-publish.yaml` の3対象を引き継ぎます。
 
 | 元の対象 | Python版 |
@@ -10,7 +10,7 @@ Pythonコードを受け取り、KubernetesのConfigMapと関数実行Podを作�
 | `start_func_in_container.sh` | `seed/backend.py`（Kubernetes API） |
 | `Dockerfile.seed` | Python専用の`Dockerfile.seed` |
 | `Dockerfile.nfd` | NFDはC++製デーモンのまま引き継ぎ |
-| `sidecar/` | 既存Python実行系を引き継ぎ、起動パスとgRPC待機を修正 |
+| `sidecar/` | 公開版ndnc CLIを使う.ndn実行系とNDN Sidecar |
 | Workflow | `.github/workflows/docker-push.yaml` |
 
 旧worker.cppは元のWorkflowのビルドに含まれず、現在のSeedからも呼ばれないため対象外です。
@@ -39,7 +39,9 @@ Kubernetesのin-cluster認証、またはローカルkubeconfigを利用しま�
 `ghcr.io/nakazato-lab/ndn-tools-seed-python/my-edge-function:latest`です。自分の公開先に変更してください。
 
 KubernetesのDaemonSetやRBACなどの定義は`k8s-manifest`で管理します。
-各ノードでNFDが起動し、ホストの`/var/run/nfd-k8s/nfd.sock`が利用できる構成を前提とします。
+FunctionとSidecarにはSeedと同じ`NDN_CLIENT_TRANSPORT`を渡します。
+TCP接続時はホストソケットをマウントしません。UNIX接続時は配置先ノードの
+`/var/run/nfd-k8s`を両コンテナの`/run`へマウントします。
 
 ## Managerとの通信契約
 
@@ -50,12 +52,12 @@ KubernetesのDaemonSetやRBACなどの定義は`k8s-manifest`で管理します�
 - `must_be_fresh=True`, `can_be_prefix=True`, `lifetime=5000`
 
 ```json
-{"type":"CREATE","name":"/demo/function/func1","content":"def handle(args):\n    return '-'.join(args)","content_type":"ndn"}
+{"type":"CREATE","name":"/demo/function/func1","content":"let avg = (arg0 + arg1) / 2\nprint avg","content_type":"ndn"}
 ```
 
 `content_type`はC++版と同じく無視します。Seedは`content`が文字列であることだけを確認し、
 構文や`handle`定義を検査せず、そのまま実行用Podへ渡します。`.ndn`も受け渡しできます。
-同梱の実行サーバーは現在Python専用で、`.ndn`の実行対応は別途必要です。
+Functionは`.ndn`コードを保存し、呼び出し時に`ndnc run`を実行します。構文検査もndncに任せます。
 CREATE成功応答はKubernetes APIでのリソース作成完了であり、Pod Readyや関数実行の成功保証ではありません。
 
 DELETEは`{"type":"DELETE","name":"/demo/function/func1"}`、一覧取得はapp_paramなしです。
@@ -64,15 +66,69 @@ DELETEは`{"type":"DELETE","name":"/demo/function/func1"}`、一覧取得はapp_
 一覧はC++版と同じくプロセス内メモリで、再起動すると消えます。
 同名CREATEは409エラーになるため、置換時はDELETE後にPodの削除完了を待ってからCREATEしてください。
 
-Manager側の送信形式を変更する必要はありません。ただし既存Managerは任意のData応答を
-`Success: Function deployed`として表示します。呼び出し側ではSeed応答の`Error:`を確認し、
-成功表示も「作成要求受付」と解釈してください。API処理が5秒を超えるとManagerはタイムアウトします。
+Manager側の送信形式を変更する必要はありません。Seed応答の`Error:`は登録失敗として扱ってください。
+成功応答もリソース作成完了を意味します。API処理が5秒を超えるとManagerはタイムアウトします。
 Managerの手計算params-sha256ログは実際のwire名と一致する保証がなく、送信には使われません。
 
 NFDへの登録はUNIX接続なら`/localhost/nfd`、TCPなら`/localhop/nfd`を使用します。
 Python側は元と同様にコマンド送信元の認証を追加していません。
 複数NFD間の経路は別途必要です。Seedの登録だけでManager側NFDに経路が自動配布されるわけではありません。
 APIは[python-ndn公式ドキュメント](https://python-ndn.readthedocs.io/en/latest/src/app.html)に準拠します。
+
+## Function Podでの.ndn実行
+
+Functionイメージは公開パッケージ`ndnc==0.0.6`を`pip install`で導入します。
+`sidecar/ndnc/`へのソースコピーは行いません。公開ページ:
+https://www.piwheels.org/project/ndnc/ （通常のpipではPyPIから取得します）。
+
+`ndnc 0.0.6`は`lark==1.1.9`を要求するため、Function側の`python-ndn`は互換性のある
+`0.4.2`に固定しています。Seed側は`python-ndn==0.5.1`のままです。
+Function側は`ndnc`のパーサーやASTをインポートしません。
+`sidecar/ndn_runtime.py`はコマンドの起動と標準出力・終了コードの受け取りだけを行います。
+
+処理の流れは次のとおりです。
+
+1. SeedがコードをConfigMapに保存してFunction Podを作成。
+2. SidecarがgRPCの`DeployFunction`でソースを登録。Functionは文字列を保持するだけです。
+3. 呼び出しInterestの引数をSidecarがgRPCの`ExecuteFunction`へそのまま渡す。
+4. Functionが呼び出し専用の一時ファイル`function.ndn`にコードを保存。
+5. `ndnc run /tmp/.../function.ndn -- ARG0 ARG1 ...`を実行。
+6. 標準出力をgRPC経由でSidecarへ返し、NDN Dataとして応答。
+
+例えば次のコードを`/function`として登録できます。
+
+```text
+let avg = (arg0 + arg1) / 2
+print avg
+```
+
+`/function/(10,20)`は`ndnc run function.ndn -- 10 20`に相当し、結果は`15`です。
+位置引数を`arg0`, `arg1`, ...へ割り当てる処理はndnc自身が担当します。
+
+NDNデータ名を渡す場合は、CLIと同じく`.ndn`側で明示的に取得してください。
+Function側ではNDN名を自動的にデータ値へ変換しません。
+
+```text
+let a = interest arg0
+let b = interest arg1
+print (a + b) / 2
+```
+
+この場合の呼び出し例は`/function/(/data/a/,/data/b/)`です。
+`NDN_CLIENT_TRANSPORT`は子プロセスへ引き継がれ、NDN通信や関数合成は公開版ndncが行います。
+通信失敗時の動作やキャッシュもndnc CLIの仕様に従います。
+
+`print`の標準出力を結果として返します（最後の改行1つだけ除去）。
+終了コードが0以外なら標準エラーを含むgRPCエラーになり、Sidecarは`Error:`のDataを返します。
+実行時間は最大20秒、またはgRPCの残り期限です。中断時には子プロセスを停止し、一時ファイルを削除します。
+複数の呼び出しは別プロセス・別ファイルで実行します。
+登録成功はソースの保存完了を意味し、構文エラーは最初の実行時にndncから返されます。
+
+`/function/code`はソース取得用です。ConfigMapキーとマウント名は互換性のため`func.py`のままですが、
+実行時には`.ndn`ファイルとして保存します。Pythonの`handle(args)`自動判定・実行は行いません。
+
+変更の反映には`ndn-seed`と`my-edge-function`の両イメージを再ビルド・公開し、
+Seedを更新した後で既存Function Podを削除・再登録してください。
 
 ## ビルドと公開
 

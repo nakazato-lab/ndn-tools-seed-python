@@ -1,4 +1,7 @@
 import sys
+import logging
+
+logging.basicConfig(level=logging.INFO)
 from ndn_function_grpc import NDNFunction
 
 def data_request_handler(name: str) -> str:

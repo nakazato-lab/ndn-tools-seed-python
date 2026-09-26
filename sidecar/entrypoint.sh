@@ -9,7 +9,7 @@ PORT=50051
 export GRPC_PORT="$PORT"
 
 # ホストからマウントされるNFDソケットのパス
-export NDN_CLIENT_TRANSPORT="unix:///run/nfd.sock"
+export NDN_CLIENT_TRANSPORT="${NDN_CLIENT_TRANSPORT:-unix:///run/nfd.sock}"
 
 echo "[Container] Starting Interpreter on port $PORT..."
 python3 interpreter_server.py "$PORT" &

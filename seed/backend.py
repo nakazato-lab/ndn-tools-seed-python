@@ -1,5 +1,6 @@
 """Kubernetes backend; all blocking calls run outside the NDN event loop."""
 import hashlib
+import os
 import re
 
 from kubernetes import client, config
@@ -12,10 +13,11 @@ def resource_name(prefix):
 
 
 class KubernetesBackend:
-    def __init__(self, namespace, node_name, image, api=None):
+    def __init__(self, namespace, node_name, image, api=None, transport=None):
         self.namespace = namespace
         self.node_name = node_name
         self.image = image
+        self.transport = transport or os.getenv("NDN_CLIENT_TRANSPORT", "unix:///run/nfd.sock")
         if api is None:
             try:
                 config.load_incluster_config()
@@ -43,20 +45,26 @@ class KubernetesBackend:
             'containers': [
                 {'name': 'function', 'image': self.image,
                  'command': ['python3', 'interpreter_server.py', '50051'],
-                 'volumeMounts': mounts},
+                 'env': [{'name': 'NDN_CLIENT_TRANSPORT', 'value': self.transport}],
+                 'volumeMounts': mounts.copy()},
                 {'name': 'sidecar', 'image': self.image,
                  'command': ['/bin/bash', '-ec'],
                  'args': ['python3 deploy.py 50051 /app/func.py; exec python3 main.py "$1" "$2"',
                           'seed-sidecar', prefix, self.namespace],
-                 'env': [{'name': 'NDN_CLIENT_TRANSPORT', 'value': 'unix:///run/nfd.sock'}],
-                 'volumeMounts': mounts + [{'name': 'nfd', 'mountPath': '/run'}]},
+                 'env': [{'name': 'NDN_CLIENT_TRANSPORT', 'value': self.transport}],
+                 'volumeMounts': mounts.copy()},
             ],
             'volumes': [
                 {'name': 'code', 'configMap': {'name': name}},
                 {'name': 'shared', 'emptyDir': {}},
-                {'name': 'nfd', 'hostPath': {'path': '/var/run/nfd-k8s', 'type': 'Directory'}},
             ],
         }
+        if self.transport.startswith('unix://'):
+            spec['volumes'].append({
+                'name': 'nfd', 'hostPath': {'path': '/var/run/nfd-k8s', 'type': 'Directory'},
+            })
+            for container in spec['containers']:
+                container['volumeMounts'].append({'name': 'nfd', 'mountPath': '/run'})
         if self.node_name:
             spec['nodeName'] = self.node_name
         try:

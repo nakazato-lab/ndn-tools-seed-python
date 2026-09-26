@@ -54,7 +54,7 @@ def arguments():
 
 
 async def run(args):
-    backend = KubernetesBackend(args.namespace, args.node_name, args.function_image)
+    backend = KubernetesBackend(args.namespace, args.node_name, args.function_image, transport=args.transport)
     app = NDNApp(face=make_face(args.transport), keychain=KeychainDigest())
     server = SeedServer(app, backend, args.name, args.freshness, args.final)
     loop = asyncio.get_running_loop()

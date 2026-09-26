@@ -1,151 +1,84 @@
+"""Forward NDN function requests to the gRPC runtime on the same Pod."""
 import asyncio
-import os
-import random
-import subprocess
-import datetime
-import threading
 import logging
-from typing import Callable, Optional, List
-
+import os
+from pathlib import Path
 import grpc
-from ndn.app import NDNApp
-from ndn.encoding import Name, InterestParam, BinaryStr, FormalName, Component
-from ndn.types import InterestNack, InterestTimeout
-
+from ndn.encoding import Name, Component
 import function_pb2
 import function_pb2_grpc
-
+from ndn_transport import make_app
 from lib.ndn_utils import (
-    SEGMENT_SIZE,
-    extract_first_level_args,
-    extract_my_function_name,
-    is_function_request,
-    get_original_name,
-    get_data,
+    SEGMENT_SIZE, extract_first_level_args, extract_my_function_name,
+    is_function_request, get_original_name,
 )
 
-logging.basicConfig(format='[{asctime}]{levelname}:{message}',
-                    datefmt='%Y-%m-%d %H:%M:%S',
-                    level=logging.INFO,
-                    style='{')
+LOG = logging.getLogger(__name__)
 
 
 class NDNFunction:
     def __init__(self):
-        logging.info("Initializing NDNFunction")
-        self.app = NDNApp()
-        self.client_app = NDNApp()
+        self.app = make_app()
         self.segmented_data = {}
-        # client_app をバックグラウンドで起動
-        threading.Thread(target=self.client_app.run_forever, daemon=True).start()
+        self.tasks = set()
+        port = os.getenv('GRPC_PORT', '50051')
+        self.channel = grpc.insecure_channel(f'localhost:{port}')
+        self.stub = function_pb2_grpc.FunctionRuntimeStub(self.channel)
 
-        port = os.environ.get('GRPC_PORT', '50051')
-        self.grpc_channel = grpc.insecure_channel(f'localhost:{port}')
-        self.grpc_stub = function_pb2_grpc.FunctionRuntimeStub(self.grpc_channel)
-        
-        mobile_code = os.environ.get('MOBILE_CODE')
-        if mobile_code:
-            logging.info("Deploying mobile code to gRPC server")
-            try:
-                deploy_req = function_pb2.DeployRequest(code_content=mobile_code)
-                deploy_res = self.grpc_stub.DeployFunction(deploy_req)
-                if deploy_res.success:
-                    logging.info("Mobile code deployed successfully")
-                else:
-                    logging.error(f"Failed to deploy mobile code: {deploy_res.message}")
-                    
-            except Exception as e:
-                logging.error(f"Error deploying mobile code: {e}")
+    async def handle(self, name, param, prefix, data_request_handler):
+        try:
+            original = get_original_name(name)
+            original_str = Name.to_str(original)
+            if Component.get_type(name[-1]) == Component.TYPE_SEGMENT:
+                segment = Component.to_number(name[-1])
+                packets = self.segmented_data[original_str]
+                self.app.put_raw_packet(packets[segment])
+                return
+            if original == Name.normalize(prefix + '/code'):
+                # ndnc clients fetch source before deciding where to execute.
+                source = Path(os.getenv('FUNCTION_CODE_PATH', '/app/func.py')).read_bytes()
+                self.app.put_data(name, content=source, freshness_period=0)
+                return
+            if is_function_request(original):
+                args = [arg for arg in extract_first_level_args(original) if arg]
+                request = function_pb2.FunctionRequest(name=extract_my_function_name(original), args=args)
+                LOG.info('Executing %s with args=%r', request.name, args)
+                # Keep the NDN loop available for data fetches and nested calls.
+                response = await asyncio.to_thread(self.stub.ExecuteFunction, request, timeout=20)
+                content = response.result.encode()
+            else:
+                content = data_request_handler(Name.to_str(name)).encode()
+            if not param.can_be_prefix:
+                # ndn-compiler uses exact-name Interests for remote execution.
+                self.app.put_data(name, content=content, freshness_period=0)
+                return
+            count = max(1, (len(content) + SEGMENT_SIZE - 1) // SEGMENT_SIZE)
+            packets = [self.app.prepare_data(
+                original + [Component.from_segment(i)],
+                content=content[i * SEGMENT_SIZE:(i + 1) * SEGMENT_SIZE],
+                freshness_period=10000, final_block_id=Component.from_segment(count - 1),
+            ) for i in range(count)]
+            self.segmented_data[original_str] = packets
+            self.app.put_raw_packet(packets[0])
+        except Exception as exc:
+            LOG.exception('Function request failed')
+            detail = exc.details() if isinstance(exc, grpc.RpcError) else str(exc)
+            self.app.put_data(name, content=f'Error: {detail}'.encode(), freshness_period=0)
 
-    def grpc_function_handler(self, name: str, args: List[bytes]) -> bytes:
-        logging.info(f"Invoking gRPC function: {name} with args: {[a.decode() for a in args if a is not None]}")
-        args_str = [arg.decode() for arg in args if arg is not None]
-        request = function_pb2.FunctionRequest(name=name, args=args_str)
-        response = self.grpc_stub.ExecuteFunction(request)
-        return response.result.encode()
+    def run(self, prefix, data_request_handler):
+        prefix = Name.to_str(Name.normalize(prefix)).rstrip('/')
 
-    def run(self, prefix: str, data_request_handler: Callable[[str], str]):
-        logging.info(f"Advertising prefix: {prefix}")
-        # os.system(f"nlsrc advertise {prefix}")
+        def on_interest(name, param, _app_param):
+            task = asyncio.create_task(self.handle(name, param, prefix, data_request_handler))
+            self.tasks.add(task)
+            task.add_done_callback(self.tasks.discard)
 
+        async def started():
+            if not await self.app.register(prefix, on_interest):
+                raise RuntimeError(f'NFD rejected function prefix: {prefix}')
+            LOG.info('Function prefix registered: %s', prefix)
 
-        @self.app.route(prefix)
-        def on_interest(name: FormalName, param: InterestParam, _app_param: Optional[BinaryStr]):
-            async def async_on_interest():
-                logging.info(f"Received Interest: {Name.to_str(name)} with params: {param}")
-                nonce = param.nonce or random.randint(0, 2**32 - 1)
-                name_str = Name.to_str(name)
-                original_name = get_original_name(name)
-
-                if not is_function_request(original_name):
-                    logging.info("Processing as data request")
-                    content = data_request_handler(name_str).encode()
-                    if Component.get_type(name[-1]) != Component.TYPE_SEGMENT:
-                        seg_cnt = (len(content) + SEGMENT_SIZE - 1) // SEGMENT_SIZE
-                        packets = [self.app.prepare_data(original_name + [Component.from_segment(i)],
-                                                         content[i*SEGMENT_SIZE:(i+1)*SEGMENT_SIZE],
-                                                         freshness_period=10000,
-                                                         final_block_id=Component.from_segment(seg_cnt - 1))
-                                   for i in range(seg_cnt)]
-                        self.segmented_data[Name.to_str(original_name)] = packets
-                        seg_no = 0
-                    else:
-                        seg_no = Component.to_number(name[-1])
-                    logging.info(f"Sending data segment: {seg_no}")
-                    self.app.put_raw_packet(self.segmented_data[Name.to_str(original_name)][seg_no])
-                    return
-
-                logging.info("Processing as function request")
-
-                if Component.get_type(name[-1]) != Component.TYPE_SEGMENT:
-                    args = extract_first_level_args(name)
-                    logging.info(f"Extracted args: {args}")
-                    
-                    async def fetch(arg: str):
-                        for attempt in range(3):
-                            logging.info(f"[Fetch] {arg} (try {attempt+1})")
-                            try:
-                                data = await get_data(
-                                    self.client_app, arg,
-                                    timeout=1000,   
-                                )
-                                if data:
-                                    logging.info(f"[Fetch] OK {arg}: {data}")
-                                    return data
-                            except (InterestTimeout, InterestNack) as e:
-                                logging.warning(f"[Fetch] {arg} failed: {e}")
-                            await asyncio.sleep(0.2)
-                        logging.error(f"[Fetch] GIVE‑UP {arg}")
-                        return None
-
-                    tasks = [fetch(arg) for arg in args]
-                    contents = await asyncio.gather(*tasks)
-
-                    if any(c is None for c in contents):
-                        logging.error(f"One or more args failed to fetch. contents: {contents}")
-                        return
-
-                    my_function_name = extract_my_function_name(name)
-                    logging.info(f"Executing function: {my_function_name}")
-                    result = self.grpc_function_handler(my_function_name, contents)
-                    logging.info(f"Function result (raw): {result}")
-
-                    seg_cnt = (len(result) + SEGMENT_SIZE - 1) // SEGMENT_SIZE
-                    packets = [self.app.prepare_data(original_name + [Component.from_segment(i)],
-                                                     result[i*SEGMENT_SIZE:(i+1)*SEGMENT_SIZE],
-                                                     freshness_period=10000,
-                                                     final_block_id=Component.from_segment(seg_cnt - 1))
-                               for i in range(seg_cnt)]
-                    logging.debug(f"Segmented packets stored for {Name.to_str(original_name)}: {len(packets)} segments")
-
-                    self.segmented_data[Name.to_str(original_name)] = packets
-                    seg_no = 0
-                else:
-                    seg_no = Component.to_number(name[-1])
-                logging.info(f"Sending function response segment: {seg_no}")
-                self.app.put_raw_packet(self.segmented_data[Name.to_str(original_name)][seg_no])
-
-            asyncio.create_task(async_on_interest())
-
-        logging.info("Starting NDN event loop")
-        self.app.run_forever()
+        try:
+            self.app.run_forever(after_start=started())
+        finally:
+            self.channel.close()
