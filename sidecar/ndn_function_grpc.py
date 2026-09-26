@@ -36,7 +36,7 @@ class NDNFunction:
                 return
             if original == Name.normalize(prefix + '/code'):
                 # ndnc clients fetch source before deciding where to execute.
-                source = Path(os.getenv('FUNCTION_CODE_PATH', '/app/func.py')).read_bytes()
+                source = Path(os.getenv('FUNCTION_CODE_PATH', '/app/func.ndn')).read_bytes()
                 self.app.put_data(name, content=source, freshness_period=0)
                 return
             if is_function_request(original):

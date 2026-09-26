@@ -74,20 +74,20 @@ class KubernetesBackend:
         self._delete_existing(name)
         self.api.create_namespaced_config_map(self.namespace, {
             'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': metadata,
-            'data': {'func.py': code},
+            'data': {'func.ndn': code},
         }, _request_timeout=10)
-        mounts = [{'name': 'code', 'mountPath': '/app/func.py', 'subPath': 'func.py'},
+        mounts = [{'name': 'code', 'mountPath': '/app/func.ndn', 'subPath': 'func.ndn'},
                   {'name': 'shared', 'mountPath': '/app/shared'}]
         spec = {
             'restartPolicy': 'Never',
             'containers': [
                 {'name': 'function', 'image': self.function_image,
-                 'command': ['python3', 'interpreter_server.py', '50051'],
+                 'command': ['python3', 'interpreter_server.py', '50051', '/app/func.ndn'],
                  'env': [{'name': 'NDN_CLIENT_TRANSPORT', 'value': self.transport}],
                  'volumeMounts': mounts.copy()},
                 {'name': 'sidecar', 'image': self.sidecar_image,
                  'command': ['/bin/bash', '-ec'],
-                 'args': ['python3 deploy.py 50051 /app/func.py; exec python3 main.py "$1" "$2"',
+                 'args': ['exec python3 main.py "$1" "$2"',
                           'seed-sidecar', prefix, self.namespace],
                  'env': [{'name': 'NDN_CLIENT_TRANSPORT', 'value': self.transport}],
                  'volumeMounts': mounts.copy()},

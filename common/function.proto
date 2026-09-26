@@ -4,16 +4,6 @@ package function;
 
 service FunctionRuntime {
   rpc ExecuteFunction (FunctionRequest) returns (FunctionResponse);
-  rpc DeployFunction (DeployRequest) returns (DeployResponse);
-}
-
-message DeployRequest {
-  string code_content = 1;
-}
-
-message DeployResponse {
-  bool success = 1;
-  string message = 2;
 }
 
 message FunctionRequest {
