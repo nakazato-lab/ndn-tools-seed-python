@@ -64,7 +64,7 @@ class SeedServer:
                         LOG.info('Received function: %s\n%s', prefix, code)
                         await asyncio.to_thread(self.backend.create, prefix, code)
                         self.active.add(prefix)
-                    else:
+                    elif operation == 'DELETE':
                         await asyncio.to_thread(self.backend.delete, prefix)
                         self.active.discard(prefix)
                 content = ('\n'.join(sorted(self.active)) + '\n') if self.active else 'no server created\n'
