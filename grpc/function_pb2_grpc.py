@@ -1,4 +1,4 @@
-"""gRPC client and server bindings for common/function.proto."""
+"""gRPC client and server bindings for grpc/function.proto."""
 import grpc
 
 import function_pb2 as function__pb2
