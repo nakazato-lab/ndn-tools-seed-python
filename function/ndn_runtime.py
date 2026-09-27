@@ -1,6 +1,7 @@
 """Execute the published ndnc CLI without importing its parser or interpreter."""
 import asyncio
 import logging
+import json
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,9 +24,10 @@ class DeployedFunction:
         with tempfile.TemporaryDirectory(prefix='ndnc-function-') as directory:
             path = Path(directory) / 'function.ndn'
             path.write_text(self.source, encoding='utf-8')
+            result_path = Path(directory) / 'result.json'
             # No shell: arguments are passed literally, including leading '-'.
             process = await asyncio.create_subprocess_exec(
-                'ndnc', 'run', str(path), '--', *args,
+                'ndnc', 'run', '--result-file', str(result_path), str(path), '--', *args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -44,6 +46,7 @@ class DeployedFunction:
                 raise RuntimeError(f'ndnc run failed (exit {process.returncode}): {error}')
             if error:
                 LOG.info('ndnc stderr: %s', error)
-            # ndnc print statements end with a newline; remove just the final
-            # line terminator while preserving other whitespace/output.
-            return stdout.decode('utf-8').removesuffix('\n')
+            if stdout:
+                LOG.info('ndnc stdout: %s', stdout.decode('utf-8', errors='replace').rstrip('\n'))
+            result = json.loads(result_path.read_text(encoding='utf-8'))
+            return '' if result is None else str(result)
