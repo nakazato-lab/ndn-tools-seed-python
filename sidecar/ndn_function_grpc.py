@@ -29,28 +29,35 @@ class NDNFunction:
         try:
             original = get_original_name(name)
             original_str = Name.to_str(original)
+            LOG.info('Received Interest: %s', Name.to_str(name))
             if Component.get_type(name[-1]) == Component.TYPE_SEGMENT:
                 segment = Component.to_number(name[-1])
                 packets = self.segmented_data[original_str]
                 self.app.put_raw_packet(packets[segment])
+                LOG.info('Returned cached Data segment: name=%s segment=%d', original_str, segment)
                 return
             if original == Name.normalize(prefix + '/code'):
+                LOG.info('Code request: %s; serving source without executing the function', original_str)
                 # ndnc clients fetch source before deciding where to execute.
                 source = Path(os.getenv('FUNCTION_CODE_PATH', '/app/func.ndn')).read_bytes()
                 self.app.put_data(name, content=source, freshness_period=0)
+                LOG.info('Returned function code: name=%s bytes=%d', original_str, len(source))
                 return
             if is_function_request(original):
                 args = [arg for arg in extract_first_level_args(original) if arg]
                 request = function_pb2.FunctionRequest(name=extract_my_function_name(original), args=args)
-                LOG.info('Executing %s with args=%r', request.name, args)
+                LOG.info('Execution request: %s; forwarding to Function container via gRPC, args=%r',
+                         original_str, args)
                 # Keep the NDN loop available for data fetches and nested calls.
                 response = await asyncio.to_thread(self.stub.ExecuteFunction, request, timeout=20)
                 content = response.result.encode()
+                LOG.info('Function execution completed: name=%s result=%r', original_str, response.result)
             else:
                 content = data_request_handler(Name.to_str(name)).encode()
             if not param.can_be_prefix:
                 # ndn-compiler uses exact-name Interests for remote execution.
                 self.app.put_data(name, content=content, freshness_period=0)
+                LOG.info('Returned result Data: name=%s bytes=%d', original_str, len(content))
                 return
             count = max(1, (len(content) + SEGMENT_SIZE - 1) // SEGMENT_SIZE)
             packets = [self.app.prepare_data(
@@ -60,6 +67,8 @@ class NDNFunction:
             ) for i in range(count)]
             self.segmented_data[original_str] = packets
             self.app.put_raw_packet(packets[0])
+            LOG.info('Returned first result Data segment: name=%s segments=%d bytes=%d',
+                     original_str, count, len(content))
         except Exception as exc:
             LOG.exception('Function request failed')
             detail = exc.details() if isinstance(exc, grpc.RpcError) else str(exc)
