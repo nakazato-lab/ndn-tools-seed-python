@@ -1,5 +1,7 @@
-![Architecture overview](docs/images/architecture-overview.png)
+![setup](docs/images/setup.png)
 
-![Function registration](docs/images/function-registration.png)
+![register](docs/images/register.png)
 
-![Function invocation](docs/images/function-invocation.png)
+![get-func](docs/images/get-func.png)
+
+![get-data](docs/images/get-data.png)
