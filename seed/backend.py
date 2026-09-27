@@ -43,7 +43,7 @@ class KubernetesBackend:
             time.sleep(0.25)
 
     def _delete_existing(self, name):
-        """Delete the existing function Pod and ConfigMap, when present."""
+        """Delete the existing function Pod, when present."""
         # Delete the existing function Pod before recreating it.
         try:
             self.api.delete_namespaced_pod(name, self.namespace, _request_timeout=10)
@@ -53,17 +53,18 @@ class KubernetesBackend:
         else:
             self._wait_until_deleted(self.api.read_namespaced_pod, name, 'Pod')
 
-        try:
-            self.api.delete_namespaced_config_map(name, self.namespace, _request_timeout=10)
-        except ApiException as exc:
-            if exc.status != 404:
-                raise
-        else:
-            self._wait_until_deleted(
-                self.api.read_namespaced_config_map, name, 'ConfigMap')
-
-    def create(self, prefix, code):
-        # Pod and ConfigMap use the same Kubernetes resource name.
+    def create(self, prefix):
+        function_name = prefix.removeprefix('/')
+        configmap_name = f'function-{function_name}'
+        configmap_key = f'{function_name}.ndn'
+        if len(configmap_name) > 253 or not re.fullmatch(
+                r'[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*', configmap_name):
+            raise ValueError(f'Function prefix cannot form a ConfigMap name: {prefix}')
+        # Validate the external reference before replacing an existing function Pod.
+        configmap = self.api.read_namespaced_config_map(
+            configmap_name, self.namespace, _request_timeout=10)
+        if configmap_key not in (configmap.data or {}):
+            raise ValueError(f'ConfigMap {configmap_name} has no key {configmap_key}')
         name = resource_name(prefix)
         metadata = {
             'name': name,
@@ -72,10 +73,6 @@ class KubernetesBackend:
         }
         # CREATE replaces a prior deployment of the same NDN prefix.
         self._delete_existing(name)
-        self.api.create_namespaced_config_map(self.namespace, {
-            'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': metadata,
-            'data': {'func.ndn': code},
-        }, _request_timeout=10)
         mounts = [{'name': 'code', 'mountPath': '/app/func.ndn', 'subPath': 'func.ndn'},
                   {'name': 'shared', 'mountPath': '/app/shared'}]
         spec = {
@@ -92,7 +89,8 @@ class KubernetesBackend:
                  'volumeMounts': mounts.copy()},
             ],
             'volumes': [
-                {'name': 'code', 'configMap': {'name': name}},
+                {'name': 'code', 'configMap': {'name': configmap_name,
+                                             'items': [{'key': configmap_key, 'path': 'func.ndn'}]}},
                 {'name': 'shared', 'emptyDir': {}},
             ],
         }
@@ -104,20 +102,10 @@ class KubernetesBackend:
                 container['volumeMounts'].append({'name': 'nfd', 'mountPath': '/run'})
         if self.node_name:
             spec['nodeName'] = self.node_name
-        try:
-            self.api.create_namespaced_pod(self.namespace, {
-                'apiVersion': 'v1', 'kind': 'Pod', 'metadata': metadata, 'spec': spec,
-            }, _request_timeout=10)
-        except Exception:
-            # ConfigMap was created by this request, so it is safe to roll it back.
-            self.api.delete_namespaced_config_map(name, self.namespace, _request_timeout=10)
-            raise
+        self.api.create_namespaced_pod(self.namespace, {
+            'apiVersion': 'v1', 'kind': 'Pod', 'metadata': metadata, 'spec': spec,
+        }, _request_timeout=10)
 
     def delete(self, prefix):
-        name = resource_name(prefix)
-        for delete in (self.api.delete_namespaced_pod, self.api.delete_namespaced_config_map):
-            try:
-                delete(name, self.namespace, _request_timeout=10)
-            except ApiException as exc:
-                if exc.status != 404:
-                    raise
+        # Argo CD owns the referenced ConfigMap; Seed deletes only the Pod.
+        self._delete_existing(resource_name(prefix))
