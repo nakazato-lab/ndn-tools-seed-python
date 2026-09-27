@@ -53,18 +53,9 @@ class KubernetesBackend:
         else:
             self._wait_until_deleted(self.api.read_namespaced_pod, name, 'Pod')
 
-    def create(self, prefix):
-        function_name = prefix.removeprefix('/')
-        configmap_name = f'function-{function_name}'
-        configmap_key = f'{function_name}.ndn'
-        if len(configmap_name) > 253 or not re.fullmatch(
-                r'[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*', configmap_name):
-            raise ValueError(f'Function prefix cannot form a ConfigMap name: {prefix}')
-        # Validate the external reference before replacing an existing function Pod.
-        configmap = self.api.read_namespaced_config_map(
-            configmap_name, self.namespace, _request_timeout=10)
-        if configmap_key not in (configmap.data or {}):
-            raise ValueError(f'ConfigMap {configmap_name} has no key {configmap_key}')
+    def create(self, prefix, code):
+        if not isinstance(code, str) or not code.strip() or '\x00' in code:
+            raise ValueError('code must be nonempty text without NUL characters')
         name = resource_name(prefix)
         metadata = {
             'name': name,
@@ -73,10 +64,21 @@ class KubernetesBackend:
         }
         # CREATE replaces a prior deployment of the same NDN prefix.
         self._delete_existing(name)
-        mounts = [{'name': 'code', 'mountPath': '/app/func.ndn', 'subPath': 'func.ndn'},
+        mounts = [{'name': 'code', 'mountPath': '/app/func.ndn', 'subPath': 'func.ndn', 'readOnly': True},
                   {'name': 'shared', 'mountPath': '/app/shared'}]
         spec = {
             'restartPolicy': 'Never',
+            # Write the received code before either application container starts.
+            'initContainers': [{
+                'name': 'write-function-code',
+                'image': self.function_image,
+                'command': ['python3', '-c',
+                            "import os; from pathlib import Path; "
+                            "Path('/code/func.ndn').write_text(os.environ['FUNCTION_CODE'], encoding='utf-8')"],
+                # Escape Kubernetes $(VAR) expansion so source text stays literal.
+                'env': [{'name': 'FUNCTION_CODE', 'value': code.replace('$', '$$')}],
+                'volumeMounts': [{'name': 'code', 'mountPath': '/code'}],
+            }],
             'containers': [
                 {'name': 'function', 'image': self.function_image,
                  'command': ['python3', 'interpreter_server.py', '50051', '/app/func.ndn'],
@@ -89,8 +91,7 @@ class KubernetesBackend:
                  'volumeMounts': mounts.copy()},
             ],
             'volumes': [
-                {'name': 'code', 'configMap': {'name': configmap_name,
-                                             'items': [{'key': configmap_key, 'path': 'func.ndn'}]}},
+                {'name': 'code', 'emptyDir': {}},
                 {'name': 'shared', 'emptyDir': {}},
             ],
         }
@@ -107,5 +108,5 @@ class KubernetesBackend:
         }, _request_timeout=10)
 
     def delete(self, prefix):
-        # Argo CD owns the referenced ConfigMap; Seed deletes only the Pod.
+        # Deleting the Pod also removes its code volume (emptyDir).
         self._delete_existing(resource_name(prefix))
