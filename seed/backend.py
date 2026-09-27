@@ -30,7 +30,7 @@ class KubernetesBackend:
 
     def _wait_until_deleted(self, read, name, kind):
         """Wait until Kubernetes returns 404 for a resource."""
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + 60
         while True:
             try:
                 read(name, self.namespace, _request_timeout=10)
@@ -39,7 +39,7 @@ class KubernetesBackend:
                     return
                 raise
             if time.monotonic() >= deadline:
-                raise TimeoutError(f'{kind} {name} was not deleted within 30 seconds')
+                raise TimeoutError(f'{kind} {name} was not deleted within 60 seconds')
             time.sleep(0.25)
 
     def _delete_existing(self, name):
