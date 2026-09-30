@@ -19,10 +19,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: NFD
-            context: .
-            file: ./Dockerfile.nfd
-            image_name: ndn-nfd
           - name: Seed Python
             context: .
             file: ./Dockerfile.seed
