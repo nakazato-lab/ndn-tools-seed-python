@@ -1,7 +1,7 @@
 """Use the same NFD endpoint for the runtime and the NDN sidecar."""
 import os
 from urllib.parse import urlparse
-from ndn.app import NDNApp
+from ndn_routing import RoutedNDNApp
 from ndn.security import KeychainDigest
 from ndn.transport.stream_face import TcpFace, UnixFace
 
@@ -19,4 +19,4 @@ def make_app():
         face = RemoteTcpFace(uri.hostname, uri.port or 6363)
     else:
         raise ValueError('NDN_CLIENT_TRANSPORT must be unix:///path or tcp://host:port')
-    return NDNApp(face=face, keychain=KeychainDigest())
+    return RoutedNDNApp(face=face, keychain=KeychainDigest())

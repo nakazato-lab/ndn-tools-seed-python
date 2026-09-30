@@ -5,7 +5,7 @@ import os
 import signal
 from urllib.parse import urlparse
 
-from ndn.app import NDNApp
+from ndn_routing import RoutedNDNApp
 from ndn.encoding import Name
 from ndn.security import KeychainDigest
 from ndn.transport.stream_face import TcpFace, UnixFace
@@ -62,7 +62,7 @@ async def run(args):
     backend = KubernetesBackend(
         args.namespace, args.node_name, args.function_image, args.sidecar_image,
         transport=args.transport)
-    app = NDNApp(face=make_face(args.transport), keychain=KeychainDigest())
+    app = RoutedNDNApp(face=make_face(args.transport), keychain=KeychainDigest())
     server = SeedServer(app, backend, args.name, args.freshness, args.final)
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):

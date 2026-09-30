@@ -2,6 +2,7 @@ FROM python:3.12-slim
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 
+COPY ndn_routing.py /app/
 COPY sidecar/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY grpc/function_pb2.py grpc/function_pb2_grpc.py ./
