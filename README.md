@@ -6,6 +6,8 @@
 
 ![get-data](docs/images/get-data.png)
 
+![reschedule](socs/images/reschedule.png)
+
 ### 補足
 - Invoker Jobは、ndnc runの実行のみ行い言語仕様の中でInterest Packetの送信を行なっている。関数やデータのキャッシュも行う。
     - キャッシュがあれば：コードをローカル実行
