@@ -2,15 +2,15 @@
 import hashlib
 import os
 import re
-import time
 
 from kubernetes import client, config
-from kubernetes.client.exceptions import ApiException
 
 
-def resource_name(prefix):
+def get_pod_name(prefix, node_name):
+    # e.g. /average → average
     slug = re.sub(r'[^a-z0-9-]+', '-', prefix.lower()).strip('-')[:40] or 'function'
-    return f"func-{slug}-{hashlib.sha256(prefix.encode()).hexdigest()[:12]}"
+    identity = prefix + "\0" + node_name
+    return f"func-{slug}-{hashlib.sha256(identity.encode()).hexdigest()[:12]}"
 
 
 class KubernetesBackend:
@@ -28,54 +28,39 @@ class KubernetesBackend:
             api = client.CoreV1Api()
         self.api = api
 
-    def _wait_until_deleted(self, read, name, kind):
-        """Wait until Kubernetes returns 404 for a resource."""
-        deadline = time.monotonic() + 60
-        while True:
-            try:
-                read(name, self.namespace, _request_timeout=10)
-            except ApiException as exc:
-                if exc.status == 404:
-                    return
-                raise
-            if time.monotonic() >= deadline:
-                raise TimeoutError(f'{kind} {name} was not deleted within 60 seconds')
-            time.sleep(0.25)
+    def _find_function_pod(self, prefix):
+        pods = self.api.list_namespaced_pod(self.namespace).items
+        # e.g. annotations: ndn-prefix: /average
+        for pod in pods:
+            annotations = pod.metadata.annotations or {}
+            if annotations.get('ndn-prefix') == prefix and pod.spec.node_name == self.node_name:
+                return pod
+        return None
 
-    def _delete_existing(self, name):
-        """Delete the existing function Pod, when present."""
-        # Delete the existing function Pod before recreating it.
-        try:
-            self.api.delete_namespaced_pod(name, self.namespace, _request_timeout=10)
-        except ApiException as exc:
-            if exc.status != 404:
-                raise
-        else:
-            self._wait_until_deleted(self.api.read_namespaced_pod, name, 'Pod')
+    def _delete_old_function_pods(self, prefix):
+        pods = self.api.list_namespaced_pod(self.namespace).items
+        for pod in pods:
+            annotations = pod.metadata.annotations or {}
+            if annotations.get('ndn-prefix') == prefix and pod.spec.node_name != self.node_name:
+                self.api.delete_namespaced_pod(pod.metadata.name, self.namespace)
 
-    def create(self, prefix, code):
-        if not isinstance(code, str) or not code.strip() or '\x00' in code:
-            raise ValueError('code must be nonempty text without NUL characters')
-        name = resource_name(prefix)
+    def _get_pod_manifest(self, prefix, code):
+        name = get_pod_name(prefix, self.node_name)
         metadata = {
             'name': name,
             'labels': {'app': 'edge-function', 'managed-by': 'ndn-seed-python'},
             'annotations': {'ndn-prefix': prefix},
         }
-        # CREATE replaces a prior deployment of the same NDN prefix.
-        self._delete_existing(name)
         mounts = [{'name': 'code', 'mountPath': '/app/func.ndn', 'subPath': 'func.ndn', 'readOnly': True},
                   {'name': 'shared', 'mountPath': '/app/shared'}]
         spec = {
             'restartPolicy': 'Never',
-            # Write the received code before either application container starts.
             'initContainers': [{
                 'name': 'write-function-code',
                 'image': self.function_image,
                 'command': ['python3', '-c',
                             "import os; from pathlib import Path; "
                             "Path('/code/func.ndn').write_text(os.environ['FUNCTION_CODE'], encoding='utf-8')"],
-                # Escape Kubernetes $(VAR) expansion so source text stays literal.
                 'env': [{'name': 'FUNCTION_CODE', 'value': code.replace('$', '$$')}],
                 'volumeMounts': [{'name': 'code', 'mountPath': '/code'}],
             }],
@@ -101,12 +86,25 @@ class KubernetesBackend:
             })
             for container in spec['containers']:
                 container['volumeMounts'].append({'name': 'nfd', 'mountPath': '/run'})
-        if self.node_name:
-            spec['nodeName'] = self.node_name
-        self.api.create_namespaced_pod(self.namespace, {
-            'apiVersion': 'v1', 'kind': 'Pod', 'metadata': metadata, 'spec': spec,
-        }, _request_timeout=10)
+        spec['nodeName'] = self.node_name
+        return {
+            'apiVersion': 'v1',
+            'kind': 'Pod',
+            'metadata': metadata,
+            'spec': spec,
+        }
+
+    def create(self, prefix, code):
+        if not self.node_name:
+            raise ValueError('NODE_NAME is required to place a function')
+        if self._find_function_pod(prefix) is not None:
+            return
+        self.api.create_namespaced_pod(
+            self.namespace, self._get_pod_manifest(prefix, code), _request_timeout=10)
+        self._delete_old_function_pods(prefix)
 
     def delete(self, prefix):
-        # Deleting the Pod also removes its code volume (emptyDir).
-        self._delete_existing(resource_name(prefix))
+        pod = self._find_function_pod(prefix)
+        if pod is not None:
+            self.api.delete_namespaced_pod(
+                pod.metadata.name, self.namespace)
