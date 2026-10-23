@@ -59,18 +59,29 @@ class KubernetesBackend:
             'annotations': {'ndn-prefix': prefix},
         }
         mounts = [{'name': 'code', 'mountPath': code_path, 'subPath': filename, 'readOnly': True},
-                  {'name': 'shared', 'mountPath': '/app/shared'}]
+                  {'name': 'shared', 'mountPath': '/app/shared'},
+                  {'name': 'nfd-endpoint', 'mountPath': '/etc/ndn-config'}]
         spec = {
             'restartPolicy': 'Never',
-            'initContainers': [{
-                'name': 'write-function-code',
-                'image': runtime_image,
-                'command': ['python3', '-c',
-                            "import os; from pathlib import Path; "
-                            f"Path('/code/{filename}').write_text(os.environ['FUNCTION_CODE'], encoding='utf-8')"],
-                'env': [{'name': 'FUNCTION_CODE', 'value': code.replace('$', '$$')}],
-                'volumeMounts': [{'name': 'code', 'mountPath': '/code'}],
-            }],
+            'initContainers': [
+                {
+                    'name': 'nfd-address',
+                    'image': 'ghcr.io/nakazato-lab/ndn-dhcp/ndn-dhcp-client:latest',
+                    'imagePullPolicy': 'Always',
+                    'env': [{'name': 'NODE_NAME', 'valueFrom': {
+                        'fieldRef': {'fieldPath': 'spec.nodeName'}}}],
+                    'volumeMounts': [{'name': 'nfd-endpoint', 'mountPath': '/etc/ndn-config'}],
+                },
+                {
+                    'name': 'write-function-code',
+                    'image': runtime_image,
+                    'command': ['python3', '-c',
+                                "import os; from pathlib import Path; "
+                                f"Path('/code/{filename}').write_text(os.environ['FUNCTION_CODE'], encoding='utf-8')"],
+                    'env': [{'name': 'FUNCTION_CODE', 'value': code.replace('$', '$$')}],
+                    'volumeMounts': [{'name': 'code', 'mountPath': '/code'}],
+                },
+            ],
             'containers': [
                 {'name': 'function', 'image': runtime_image,
                  'command': ['python3',
@@ -89,6 +100,7 @@ class KubernetesBackend:
             'volumes': [
                 {'name': 'code', 'emptyDir': {}},
                 {'name': 'shared', 'emptyDir': {}},
+                {'name': 'nfd-endpoint', 'emptyDir': {}},
             ],
         }
         if self.transport.startswith('unix://'):
