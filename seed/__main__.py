@@ -37,7 +37,7 @@ def arguments():
     parser.add_argument('-n', '--namespace', default=os.getenv('POD_NAMESPACE', 'default'))
     parser.add_argument('--transport', default=os.getenv('NDN_CLIENT_TRANSPORT', 'unix:///run/nfd.sock'))
     parser.add_argument('--ndn-function-image', default=os.getenv(
-        'FUNCTION_IMAGE',
+        'NDN_FUNCTION_IMAGE',
         'ghcr.io/nakazato-lab/ndn-tools-seed-python/ndn-function-runtime:latest'))
     parser.add_argument('--python-function-image', default=os.getenv(
         'PYTHON_FUNCTION_IMAGE',
