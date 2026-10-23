@@ -1,0 +1,10 @@
+FROM python:3.12-slim
+WORKDIR /app
+ENV PYTHONUNBUFFERED=1
+
+COPY function/requirements.python.txt .
+RUN pip install --no-cache-dir -r requirements.python.txt
+COPY grpc/function_pb2.py grpc/function_pb2_grpc.py ./
+COPY function/python_interpreter_server.py ./
+
+CMD ["python3", "python_interpreter_server.py", "50051"]

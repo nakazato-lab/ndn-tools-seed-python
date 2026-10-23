@@ -14,10 +14,12 @@ def get_pod_name(prefix, node_name):
 
 
 class KubernetesBackend:
-    def __init__(self, namespace, node_name, function_image, sidecar_image, api=None, transport=None):
+    def __init__(self, namespace, node_name, ndn_function_image, sidecar_image, python_function_image,
+                 api=None, transport=None):
         self.namespace = namespace
         self.node_name = node_name
-        self.function_image = function_image
+        self.ndn_function_image = ndn_function_image
+        self.python_function_image = python_function_image
         self.sidecar_image = sidecar_image
         self.transport = transport or os.getenv("NDN_CLIENT_TRANSPORT", "unix:///run/nfd.sock")
         if api is None:
@@ -44,35 +46,44 @@ class KubernetesBackend:
             if annotations.get('ndn-prefix') == prefix and pod.spec.node_name != self.node_name:
                 self.api.delete_namespaced_pod(pod.metadata.name, self.namespace)
 
-    def _get_pod_manifest(self, prefix, code):
+    def _get_pod_manifest(self, prefix, code, runtime):
+        if runtime not in ('ndn', 'python'):
+            raise ValueError(f'Unsupported function runtime: {runtime}')
+        filename = 'func.ndn' if runtime == 'ndn' else 'func.py'
+        code_path = f'/app/{filename}'
+        runtime_image = self.ndn_function_image if runtime == 'ndn' else self.python_function_image
         name = get_pod_name(prefix, self.node_name)
         metadata = {
             'name': name,
             'labels': {'app': 'edge-function', 'managed-by': 'ndn-seed-python'},
             'annotations': {'ndn-prefix': prefix},
         }
-        mounts = [{'name': 'code', 'mountPath': '/app/func.ndn', 'subPath': 'func.ndn', 'readOnly': True},
+        mounts = [{'name': 'code', 'mountPath': code_path, 'subPath': filename, 'readOnly': True},
                   {'name': 'shared', 'mountPath': '/app/shared'}]
         spec = {
             'restartPolicy': 'Never',
             'initContainers': [{
                 'name': 'write-function-code',
-                'image': self.function_image,
+                'image': runtime_image,
                 'command': ['python3', '-c',
                             "import os; from pathlib import Path; "
-                            "Path('/code/func.ndn').write_text(os.environ['FUNCTION_CODE'], encoding='utf-8')"],
+                            f"Path('/code/{filename}').write_text(os.environ['FUNCTION_CODE'], encoding='utf-8')"],
                 'env': [{'name': 'FUNCTION_CODE', 'value': code.replace('$', '$$')}],
                 'volumeMounts': [{'name': 'code', 'mountPath': '/code'}],
             }],
             'containers': [
-                {'name': 'function', 'image': self.function_image,
-                 'command': ['python3', 'interpreter_server.py', '50051', '/app/func.ndn'],
-                 'env': [{'name': 'NDN_CLIENT_TRANSPORT', 'value': self.transport}],
+                {'name': 'function', 'image': runtime_image,
+                 'command': ['python3',
+                             'ndn_interpreter_server.py' if runtime == 'ndn' else 'python_interpreter_server.py',
+                             '50051', code_path],
+                 'env': [{'name': 'NDN_CLIENT_TRANSPORT', 'value': self.transport},
+                         {'name': 'FUNCTION_CODE_PATH', 'value': code_path}],
                  'volumeMounts': mounts.copy()},
                 {'name': 'sidecar', 'image': self.sidecar_image,
                  'command': ['/bin/bash', '-ec'],
                  'args': ['exec python3 main.py "$1"', 'seed-sidecar', prefix],
-                 'env': [{'name': 'NDN_CLIENT_TRANSPORT', 'value': self.transport}],
+                 'env': [{'name': 'NDN_CLIENT_TRANSPORT', 'value': self.transport},
+                         {'name': 'FUNCTION_CODE_PATH', 'value': code_path}],
                  'volumeMounts': mounts.copy()},
             ],
             'volumes': [
@@ -94,13 +105,13 @@ class KubernetesBackend:
             'spec': spec,
         }
 
-    def create(self, prefix, code):
+    def create(self, prefix, code, runtime):
         if not self.node_name:
             raise ValueError('NODE_NAME is required to place a function')
         if self._find_function_pod(prefix) is not None:
             return
         self.api.create_namespaced_pod(
-            self.namespace, self._get_pod_manifest(prefix, code), _request_timeout=10)
+            self.namespace, self._get_pod_manifest(prefix, code, runtime), _request_timeout=10)
         self._delete_old_function_pods(prefix)
 
     def delete(self, prefix):

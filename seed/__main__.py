@@ -36,9 +36,12 @@ def arguments():
     parser.add_argument('--node-name', default=os.getenv('NODE_NAME'))
     parser.add_argument('-n', '--namespace', default=os.getenv('POD_NAMESPACE', 'default'))
     parser.add_argument('--transport', default=os.getenv('NDN_CLIENT_TRANSPORT', 'unix:///run/nfd.sock'))
-    parser.add_argument('--function-image', default=os.getenv(
+    parser.add_argument('--ndn-function-image', default=os.getenv(
         'FUNCTION_IMAGE',
         'ghcr.io/nakazato-lab/ndn-tools-seed-python/ndn-function-runtime:latest'))
+    parser.add_argument('--python-function-image', default=os.getenv(
+        'PYTHON_FUNCTION_IMAGE',
+        'ghcr.io/nakazato-lab/ndn-tools-seed-python/python-function-runtime:latest'))
     parser.add_argument('--sidecar-image', default=os.getenv(
         'SIDECAR_IMAGE',
         'ghcr.io/nakazato-lab/ndn-tools-seed-python/ndn-function-sidecar:latest'))
@@ -60,7 +63,8 @@ def arguments():
 
 async def run(args):
     backend = KubernetesBackend(
-        args.namespace, args.node_name, args.function_image, args.sidecar_image,
+        args.namespace, args.node_name, args.ndn_function_image, args.sidecar_image,
+        python_function_image=args.python_function_image,
         transport=args.transport)
     app = RoutedNDNApp(face=make_face(args.transport), keychain=KeychainDigest())
     server = SeedServer(app, backend, args.name, args.freshness, args.final)

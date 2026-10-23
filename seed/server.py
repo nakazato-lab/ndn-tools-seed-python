@@ -20,10 +20,13 @@ def parse_request(raw):
     if name == '/':
         raise ValueError('name cannot be the root prefix')
     code = doc.get('content')
+    runtime = doc.get('runtime')
     if doc['type'] == 'CREATE':
         if not isinstance(code, str) or not code.strip() or '\x00' in code:
             raise ValueError('content must be nonempty text without NUL characters')
-    return doc['type'], name, code
+        if runtime not in ('ndn', 'python'):
+            raise ValueError("runtime must be 'ndn' or 'python'")
+    return doc['type'], name, code, runtime
 
 
 
@@ -58,10 +61,10 @@ class SeedServer:
         try:
             async with self.lock:
                 if app_param is not None:
-                    operation, prefix, code = parse_request(app_param)
+                    operation, prefix, code, runtime = parse_request(app_param)
                     if operation == 'CREATE':
-                        LOG.info('Received function: %s\n%s', prefix, code)
-                        await asyncio.to_thread(self.backend.create, prefix, code)
+                        LOG.info('Received %s function: %s\n%s', runtime, prefix, code)
+                        await asyncio.to_thread(self.backend.create, prefix, code, runtime)
                         self.active.add(prefix)
                     elif operation == 'DELETE':
                         await asyncio.to_thread(self.backend.delete, prefix)
