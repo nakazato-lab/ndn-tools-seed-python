@@ -23,7 +23,7 @@ def get_original_name(name: FormalName) -> FormalName:
 # Name.to_str(name)でデコードした場合、/A/%28B%29/t=12411 のようになっているため、/A/(〇〇)/t=12411 のようにデコードする
 # /A/(〇〇)/t=12411 のようになる構造上、最後の)以降を削除すれば良い
 # /A/data などのデータリクエストの場合は、/t=だけ消して、そのまま返す
-def decode_and_remove_metadata(name: FormalName) -> str:
+def decode_and_remove_metadata_from_interest(name: FormalName) -> str:
     # 名前をデコード
     decoded_name = Name.to_str(name)
     decoded_name = urllib.parse.unquote(decoded_name)
@@ -42,42 +42,34 @@ def decode_and_remove_metadata(name: FormalName) -> str:
     return decoded_name
 
 
-# name 構造から、function リクエストかを調べる
-# /A/(〇〇) のような構造であれば function リクエストなので、/(が存在すれば関数と判断する
-# そうでなければ、data リクエストなので、データを返す
-def is_function_request(name: FormalName) -> bool:
-    decoded_url = decode_and_remove_metadata(name)
-    return "/(" in decoded_url
+# 関数リクエストから、引数を抽出する。
+# /A は引数なし関数として扱う。
+def extract_function_args(name: FormalName) -> List[str]:
+    decoded_interest = decode_and_remove_metadata_from_interest(name)
 
-# function リクエストから、第一階層の引数を抽出する
-def extract_first_level_args(name: FormalName) -> List[str]:
-    decoded_url = decode_and_remove_metadata(name)
-    
-    def trim(s: str) -> str:
-        return s.strip()
+    return parse_function_args(decoded_interest)
 
+
+def parse_function_args(function_call: str) -> List[str]:
+    # 引数なしの場合は空配列を返す
     args = []
-    if '(' not in decoded_url:
-        args.append(trim(decoded_url))
-        return args
+    if '(' in function_call:
+        function_name_end_index = function_call.find('/(')
+        start_of_args = function_name_end_index + 2
+        args_str = function_call[start_of_args:-1]
 
-    # Correctly extract the function name
-    end_of_function_name = decoded_url.find('/(')
-    start_of_args = end_of_function_name + 2
-    args_str = decoded_url[start_of_args:-1]
+        start = 0
+        bracket_count = 0
+        for i, char in enumerate(args_str):
+            if char == '(':
+                bracket_count += 1
+            elif char == ')':
+                bracket_count -= 1
+            elif char == ',' and bracket_count == 0:
+                args.append(args_str[start:i].strip())
+                start = i + 1
 
-    start = 0
-    bracket_count = 0
-    for i, char in enumerate(args_str):
-        if char == '(':
-            bracket_count += 1
-        elif char == ')':
-            bracket_count -= 1
-        elif char == ',' and bracket_count == 0:
-            args.append(trim(args_str[start:i]))
-            start = i + 1
-
-    args.append(trim(args_str[start:]))
+        args.append(args_str[start:].strip())
     return args
 
 
@@ -140,9 +132,7 @@ async def get_data(app: NDNApp, name: str, timeout: int = 20000, nonce: Optional
 
     return  result
 
-# function リクエストから、自分の関数名を取得する
-# /A/(/hoge,/B/func(/hoge)) のような構造であれば、/A が関数名になる
 def extract_my_function_name(name: FormalName) -> str:
-    decoded_url = decode_and_remove_metadata(name)
-    end_of_function_name = decoded_url.find('/(')
-    return decoded_url[:end_of_function_name]
+    decoded_interest = decode_and_remove_metadata_from_interest(name) # /average/(10,20)
+    function_name, _, _ = decoded_interest.partition('/(') # /average
+    return function_name

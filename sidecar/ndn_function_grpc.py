@@ -9,8 +9,8 @@ import function_pb2
 import function_pb2_grpc
 from ndn_transport import make_app
 from lib.ndn_utils import (
-    SEGMENT_SIZE, extract_first_level_args, extract_my_function_name,
-    is_function_request, get_original_name,
+    SEGMENT_SIZE, extract_function_args, extract_my_function_name,
+    get_original_name,
 )
 
 LOG = logging.getLogger(__name__)
@@ -25,7 +25,7 @@ class NDNFunction:
         self.channel = grpc.insecure_channel(f'localhost:{port}')
         self.stub = function_pb2_grpc.FunctionRuntimeStub(self.channel)
 
-    async def handle(self, name, param, prefix, data_request_handler):
+    async def handle(self, name, param, prefix):
         try:
             original = get_original_name(name)
             original_str = Name.to_str(original)
@@ -43,17 +43,14 @@ class NDNFunction:
                 self.app.put_data(name, content=source, freshness_period=0)
                 LOG.info('Returned function code: name=%s bytes=%d', original_str, len(source))
                 return
-            if is_function_request(original):
-                args = [arg for arg in extract_first_level_args(original) if arg]
-                request = function_pb2.FunctionRequest(name=extract_my_function_name(original), args=args)
-                LOG.info('Execution request: %s; forwarding to Function container via gRPC, args=%r',
-                         original_str, args)
-                # Keep the NDN loop available for data fetches and nested calls.
-                response = await asyncio.to_thread(self.stub.ExecuteFunction, request, timeout=20)
-                content = response.result.encode()
-                LOG.info('Function execution completed: name=%s result=%r', original_str, response.result)
-            else:
-                content = data_request_handler(Name.to_str(name)).encode()
+            args = [arg for arg in extract_function_args(original) if arg]
+            request = function_pb2.FunctionRequest(name=extract_my_function_name(original), args=args)
+            LOG.info('Execution request: %s; forwarding to Function container via gRPC, args=%r',
+                     original_str, args)
+            # Keep the NDN loop available for data fetches and nested calls.
+            response = await asyncio.to_thread(self.stub.ExecuteFunction, request, timeout=20)
+            content = response.result.encode()
+            LOG.info('Function execution completed: name=%s result=%r', original_str, response.result)
             if not param.can_be_prefix:
                 # ndn-compiler uses exact-name Interests for remote execution.
                 self.app.put_data(name, content=content, freshness_period=0)
@@ -74,11 +71,11 @@ class NDNFunction:
             detail = exc.details() if isinstance(exc, grpc.RpcError) else str(exc)
             self.app.put_data(name, content=f'Error: {detail}'.encode(), freshness_period=0)
 
-    def run(self, prefix, data_request_handler):
+    def run(self, prefix):
         prefix = Name.to_str(Name.normalize(prefix)).rstrip('/')
 
         def on_interest(name, param, _app_param):
-            task = asyncio.create_task(self.handle(name, param, prefix, data_request_handler))
+            task = asyncio.create_task(self.handle(name, param, prefix))
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
 
