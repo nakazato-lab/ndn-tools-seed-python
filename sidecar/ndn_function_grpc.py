@@ -9,7 +9,7 @@ import function_pb2
 import function_pb2_grpc
 from ndn_transport import make_app
 from lib.ndn_utils import (
-    SEGMENT_SIZE, extract_function_args, extract_my_function_name,
+    SEGMENT_SIZE, extract_function_args, extract_function_name,
     get_original_name,
 )
 
@@ -44,7 +44,7 @@ class NDNFunction:
                 LOG.info('Returned function code: name=%s bytes=%d', original_str, len(source))
                 return
             args = [arg for arg in extract_function_args(original) if arg]
-            request = function_pb2.FunctionRequest(name=extract_my_function_name(original), args=args)
+            request = function_pb2.FunctionRequest(name=extract_function_name(original), args=args)
             LOG.info('Execution request: %s; forwarding to Function container via gRPC, args=%r',
                      original_str, args)
             # Keep the NDN loop available for data fetches and nested calls.

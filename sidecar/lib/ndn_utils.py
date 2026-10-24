@@ -132,7 +132,7 @@ async def get_data(app: NDNApp, name: str, timeout: int = 20000, nonce: Optional
 
     return  result
 
-def extract_my_function_name(name: FormalName) -> str:
+def extract_function_name(name: FormalName) -> str:
     decoded_interest = decode_and_remove_metadata_from_interest(name) # /average/(10,20)
     function_name, _, _ = decoded_interest.partition('/(') # /average
     return function_name
