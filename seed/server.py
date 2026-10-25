@@ -16,7 +16,7 @@ def parse_request(raw):
     name = doc.get('name')
     if not isinstance(name, str) or not name.strip():
         raise ValueError('name must be a nonempty string')
-    name = Name.to_str(Name.normalize('/' + name.lstrip('/')))
+    name = Name.to_str(Name.normalize('/' + name.strip('/'))) ## /oo/xx に統一する
     if name == '/':
         raise ValueError('name cannot be the root prefix')
     code = doc.get('content')
