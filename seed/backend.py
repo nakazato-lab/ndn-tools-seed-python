@@ -84,17 +84,25 @@ class KubernetesBackend:
             ],
             'containers': [
                 {'name': 'function', 'image': runtime_image,
-                 'command': ['python3',
-                             'ndn_interpreter_server.py' if runtime == 'ndn' else 'python_interpreter_server.py',
-                             '50051', code_path],
-                 'env': [{'name': 'NDN_CLIENT_TRANSPORT', 'value': self.transport},
-                         {'name': 'FUNCTION_CODE_PATH', 'value': code_path}],
+                 # Resolve the NFD selected for this Pod by its DHCP init
+                 # container instead of inheriting the Seed Pod's transport.
+                 'command': ['/bin/sh', '-ec'],
+                 'args': [
+                     'export NDN_CLIENT_TRANSPORT="tcp4://$(cat /etc/ndn-config/ADDRESS)"; '
+                     'exec python3 '
+                     f"{'ndn_interpreter_server.py' if runtime == 'ndn' else 'python_interpreter_server.py'} "
+                     f'50051 {code_path}',
+                 ],
+                 'env': [{'name': 'FUNCTION_CODE_PATH', 'value': code_path}],
                  'volumeMounts': mounts.copy()},
                 {'name': 'sidecar', 'image': self.sidecar_image,
                  'command': ['/bin/bash', '-ec'],
-                 'args': ['exec python3 main.py "$1"', 'seed-sidecar', prefix],
-                 'env': [{'name': 'NDN_CLIENT_TRANSPORT', 'value': self.transport},
-                         {'name': 'FUNCTION_CODE_PATH', 'value': code_path}],
+                 'args': [
+                     'export NDN_CLIENT_TRANSPORT="tcp4://$(cat /etc/ndn-config/ADDRESS)"; '
+                     'exec python3 main.py "$1"',
+                     'seed-sidecar', prefix,
+                 ],
+                 'env': [{'name': 'FUNCTION_CODE_PATH', 'value': code_path}],
                  'volumeMounts': mounts.copy()},
             ],
             'volumes': [
