@@ -72,8 +72,6 @@ class NDNFunction:
             self.app.put_data(name, content=f'Error: {detail}'.encode(), freshness_period=0)
 
     def run(self, prefix):
-        prefix = Name.to_str(Name.normalize(prefix)).rstrip('/')
-
         def on_interest(name, param, _app_param):
             task = asyncio.create_task(self.handle(name, param, prefix))
             self.tasks.add(task)
