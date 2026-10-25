@@ -1,5 +1,6 @@
 from asyncio import subprocess
 import asyncio
+import json
 from typing import Optional, List
 import urllib.parse
 from ndn.encoding import Name, FormalName, MetaInfo, BinaryStr
@@ -47,7 +48,15 @@ def decode_and_remove_metadata_from_interest(name: FormalName) -> str:
 def extract_function_args(name: FormalName) -> List[str]:
     decoded_interest = decode_and_remove_metadata_from_interest(name)
 
-    return parse_function_args(decoded_interest)
+    return [decode_json_string_argument(arg) for arg in parse_function_args(decoded_interest)]
+
+
+def decode_json_string_argument(argument: str) -> str:
+    try:
+        decoded_argument = json.loads(argument)
+    except json.JSONDecodeError:
+        return argument
+    return decoded_argument if isinstance(decoded_argument, str) else argument
 
 
 def parse_function_args(function_call: str) -> List[str]:
@@ -60,8 +69,19 @@ def parse_function_args(function_call: str) -> List[str]:
 
         start = 0
         bracket_count = 0
+        in_string = False
+        escaped = False
         for i, char in enumerate(args_str):
-            if char == '(':
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == '\\':
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+            elif char == '"':
+                in_string = True
+            elif char == '(':
                 bracket_count += 1
             elif char == ')':
                 bracket_count -= 1
