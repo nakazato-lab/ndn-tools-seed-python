@@ -88,6 +88,8 @@ class KubernetesBackend:
                  # container instead of inheriting the Seed Pod's transport.
                  'command': ['/bin/sh', '-ec'],
                  'args': [
+                     'while [ ! -f /etc/ndn-config/ADDRESS ] || '
+                     '[ "$(cat /etc/ndn-config/ADDRESS)" = "not available yet" ]; do sleep 2; done; '
                      'export NDN_CLIENT_TRANSPORT="tcp4://$(cat /etc/ndn-config/ADDRESS)"; '
                      'exec python3 '
                      f"{'ndn_interpreter_server.py' if runtime == 'ndn' else 'python_interpreter_server.py'} "
@@ -98,6 +100,8 @@ class KubernetesBackend:
                 {'name': 'sidecar', 'image': self.sidecar_image,
                  'command': ['/bin/bash', '-ec'],
                  'args': [
+                     'while [ ! -f /etc/ndn-config/ADDRESS ] || '
+                     '[ "$(cat /etc/ndn-config/ADDRESS)" = "not available yet" ]; do sleep 2; done; '
                      'export NDN_CLIENT_TRANSPORT="tcp4://$(cat /etc/ndn-config/ADDRESS)"; '
                      'exec python3 main.py "$1"',
                      'seed-sidecar', prefix,
