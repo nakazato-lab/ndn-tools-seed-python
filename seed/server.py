@@ -67,24 +67,25 @@ class SeedServer:
 
     async def handle(self, name, app_param):
         try:
+            operation = None
+            if app_param is not None:
+                operation, prefix, code, code_ref, runtime = parse_request(app_param)
             async with self.lock:
-                if app_param is not None:
-                    operation, prefix, code, code_ref, runtime = parse_request(app_param)
-                    if operation == 'CREATE':
-                        if code_ref is not None:
-                            try:
-                                code = (await self.fetcher.fetch(
-                                    code_ref, must_be_fresh=True)).decode('utf-8')
-                            except UnicodeDecodeError as exc:
-                                raise ValueError('function code must be UTF-8 text') from exc
-                        if not isinstance(code, str) or not code.strip() or '\x00' in code:
-                            raise ValueError('content must be nonempty text without NUL characters')
-                        LOG.info('Received %s function: %s', runtime, prefix)
-                        await asyncio.to_thread(self.backend.create, prefix, code, runtime)
-                        self.active.add(prefix)
-                    elif operation == 'DELETE':
-                        await asyncio.to_thread(self.backend.delete, prefix)
-                        self.active.discard(prefix)
+                if operation == 'CREATE':
+                    if code_ref is not None:
+                        try:
+                            code = (await self.fetcher.fetch(
+                                code_ref, must_be_fresh=True)).decode('utf-8')
+                        except UnicodeDecodeError as exc:
+                            raise ValueError('function code must be UTF-8 text') from exc
+                    if not isinstance(code, str) or not code.strip() or '\x00' in code:
+                        raise ValueError('content must be nonempty text without NUL characters')
+                    LOG.info('Received %s function: %s', runtime, prefix)
+                    await asyncio.to_thread(self.backend.create, prefix, code, runtime)
+                    self.active.add(prefix)
+                elif operation == 'DELETE':
+                    await asyncio.to_thread(self.backend.delete, prefix)
+                    self.active.discard(prefix)
                 content = ('\n'.join(sorted(self.active)) + '\n') if self.active else 'no server created\n'
         except Exception as exc:
             LOG.exception('Seed request failed')
