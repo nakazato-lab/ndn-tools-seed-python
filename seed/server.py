@@ -24,6 +24,7 @@ def parse_request(raw):
     code = doc.get('content')
     code_ref = doc.get('code_ref')
     runtime = doc.get('runtime')
+    requirements = doc.get('requirements', [])
     if doc['type'] == 'CREATE':
         if code_ref is not None:
             if not isinstance(code_ref, str) or not code_ref:
@@ -32,7 +33,14 @@ def parse_request(raw):
             raise ValueError('content must be nonempty text without NUL characters')
         if runtime not in ('ndn', 'python'):
             raise ValueError("runtime must be 'ndn' or 'python'")
-    return doc['type'], name, code, code_ref, runtime
+        if not isinstance(requirements, list) or any(
+                not isinstance(requirement, str) or not requirement.strip()
+                or '\x00' in requirement or '\n' in requirement or '\r' in requirement
+                for requirement in requirements):
+            raise ValueError('requirements must be a list of nonempty single-line strings')
+        if runtime != 'python' and requirements:
+            raise ValueError('requirements are supported only for the python runtime')
+    return doc['type'], name, code, code_ref, runtime, requirements
 
 
 
@@ -69,7 +77,7 @@ class SeedServer:
         try:
             operation = None
             if app_param is not None:
-                operation, prefix, code, code_ref, runtime = parse_request(app_param)
+                operation, prefix, code, code_ref, runtime, requirements = parse_request(app_param)
             async with self.lock:
                 if operation == 'CREATE':
                     if code_ref is not None:
@@ -81,7 +89,7 @@ class SeedServer:
                     if not isinstance(code, str) or not code.strip() or '\x00' in code:
                         raise ValueError('content must be nonempty text without NUL characters')
                     LOG.info('Received %s function: %s', runtime, prefix)
-                    await asyncio.to_thread(self.backend.create, prefix, code, runtime)
+                    await asyncio.to_thread(self.backend.create, prefix, code, runtime, requirements)
                     self.active.add(prefix)
                 elif operation == 'DELETE':
                     await asyncio.to_thread(self.backend.delete, prefix)

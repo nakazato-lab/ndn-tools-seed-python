@@ -1,5 +1,6 @@
 """Kubernetes backend; all blocking calls run outside the NDN event loop."""
 import hashlib
+import json
 import os
 import re
 
@@ -46,7 +47,7 @@ class KubernetesBackend:
             if annotations.get('ndn-prefix') == prefix and pod.spec.node_name != self.node_name:
                 self.api.delete_namespaced_pod(pod.metadata.name, self.namespace)
 
-    def _get_pod_manifest(self, prefix, code, runtime):
+    def _get_pod_manifest(self, prefix, code, runtime, requirements=()):
         if runtime not in ('ndn', 'python'):
             raise ValueError(f'Unsupported function runtime: {runtime}')
         filename = 'func.ndn' if runtime == 'ndn' else 'func.py'
@@ -61,6 +62,8 @@ class KubernetesBackend:
         mounts = [{'name': 'code', 'mountPath': code_path, 'subPath': filename, 'readOnly': True},
                   {'name': 'shared', 'mountPath': '/app/shared'},
                   {'name': 'nfd-endpoint', 'mountPath': '/etc/ndn-config'}]
+        if runtime == 'python':
+            mounts.append({'name': 'python-deps', 'mountPath': '/opt/function-venv', 'readOnly': True})
         spec = {
             'restartPolicy': 'Never',
             'initContainers': [
@@ -76,9 +79,14 @@ class KubernetesBackend:
                     'name': 'write-function-code',
                     'image': runtime_image,
                     'command': ['python3', '-c',
-                                "import os; from pathlib import Path; "
-                                f"Path('/code/{filename}').write_text(os.environ['FUNCTION_CODE'], encoding='utf-8')"],
-                    'env': [{'name': 'FUNCTION_CODE', 'value': code.replace('$', '$$')}],
+                                "import json, os; from pathlib import Path; "
+                                f"Path('/code/{filename}').write_text(os.environ['FUNCTION_CODE'], encoding='utf-8'); "
+                                "Path('/code/requirements.txt').write_text("
+                                "'\\n'.join(json.loads(os.environ['FUNCTION_REQUIREMENTS'])) + '\\n', encoding='utf-8')"],
+                    'env': [
+                        {'name': 'FUNCTION_CODE', 'value': code.replace('$', '$$')},
+                        {'name': 'FUNCTION_REQUIREMENTS', 'value': json.dumps(list(requirements))},
+                    ],
                     'volumeMounts': [{'name': 'code', 'mountPath': '/code'}],
                 },
             ],
@@ -115,6 +123,25 @@ class KubernetesBackend:
                 {'name': 'nfd-endpoint', 'emptyDir': {}},
             ],
         }
+        if runtime == 'python':
+            spec['initContainers'].append({
+                'name': 'install-python-dependencies',
+                'image': runtime_image,
+                'command': ['/bin/sh', '-ec'],
+                'args': [
+                    'python3 -m venv --system-site-packages /opt/function-venv; '
+                    '/opt/function-venv/bin/python -m pip install --no-cache-dir '
+                    '-r /code/requirements.txt',
+                ],
+                'volumeMounts': [
+                    {'name': 'code', 'mountPath': '/code', 'readOnly': True},
+                    {'name': 'python-deps', 'mountPath': '/opt/function-venv'},
+                ],
+            })
+            spec['containers'][0]['args'][0] = spec['containers'][0]['args'][0].replace(
+                'exec python3 python_interpreter_server.py',
+                'exec /opt/function-venv/bin/python python_interpreter_server.py')
+            spec['volumes'].append({'name': 'python-deps', 'emptyDir': {}})
         if self.transport.startswith('unix://'):
             spec['volumes'].append({
                 'name': 'nfd', 'hostPath': {'path': '/var/run/nfd-k8s', 'type': 'Directory'},
@@ -129,13 +156,13 @@ class KubernetesBackend:
             'spec': spec,
         }
 
-    def create(self, prefix, code, runtime):
+    def create(self, prefix, code, runtime, requirements=()):
         if not self.node_name:
             raise ValueError('NODE_NAME is required to place a function')
         if self._find_function_pod(prefix) is not None:
             return
         self.api.create_namespaced_pod(
-            self.namespace, self._get_pod_manifest(prefix, code, runtime), _request_timeout=10)
+            self.namespace, self._get_pod_manifest(prefix, code, runtime, requirements), _request_timeout=10)
         self._delete_old_function_pods(prefix)
 
     def delete(self, prefix):

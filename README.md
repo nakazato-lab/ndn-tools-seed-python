@@ -9,6 +9,10 @@
 ![reschedule](docs/images/reschedule.png)
 
 ### 補足
+- Python 関数の CREATE では、任意で `requirements` に pip requirement の配列を渡せる。依存関係は function Pod の initContainer が仮想環境へ導入してから実行される。
+  ```json
+  {"type":"CREATE","name":"/example","runtime":"python","content":"import requests\nprint(requests.__version__)","requirements":["requests==2.32.3","numpy==2.1.0"]}
+  ```
 - Invoker Jobは、ndnc runの実行のみ行い言語仕様の中でInterest Packetの送信を行なっている。関数やデータのキャッシュも行う。
     - キャッシュがあれば：コードをローカル実行
     - キャッシュがなければ：`/average/code` でコードを取得してローカル実行
