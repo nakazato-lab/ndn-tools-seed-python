@@ -51,7 +51,7 @@ class KubernetesBackend:
         if runtime not in ('ndn', 'python'):
             raise ValueError(f'Unsupported function runtime: {runtime}')
         filename = 'func.ndn' if runtime == 'ndn' else 'func.py'
-        code_path = f'/app/{filename}'
+        code_path = f'/app/code/{filename}'
         runtime_image = self.ndn_function_image if runtime == 'ndn' else self.python_function_image
         name = get_pod_name(prefix, self.node_name)
         metadata = {
@@ -59,11 +59,9 @@ class KubernetesBackend:
             'labels': {'app': 'edge-function', 'managed-by': 'ndn-seed-python'},
             'annotations': {'ndn-prefix': prefix},
         }
-        mounts = [{'name': 'code', 'mountPath': code_path, 'subPath': filename, 'readOnly': True},
+        mounts = [{'name': 'code', 'mountPath': '/app/code', 'readOnly': True},
                   {'name': 'shared', 'mountPath': '/app/shared'},
                   {'name': 'nfd-endpoint', 'mountPath': '/etc/ndn-config'}]
-        if runtime == 'python':
-            mounts.append({'name': 'python-deps', 'mountPath': '/opt/function-deps', 'readOnly': True})
         spec = {
             'restartPolicy': 'Never',
             'initContainers': [
@@ -129,18 +127,16 @@ class KubernetesBackend:
                 'image': runtime_image,
                 'command': ['/bin/sh', '-ec'],
                 'args': [
-                    'python3 -m pip install --no-cache-dir --target /opt/function-deps '
+                    'python3 -m pip install --no-cache-dir --target /code/site-packages '
                     '-r /code/requirements.txt',
                 ],
                 'volumeMounts': [
-                    {'name': 'code', 'mountPath': '/code', 'readOnly': True},
-                    {'name': 'python-deps', 'mountPath': '/opt/function-deps'},
+                    {'name': 'code', 'mountPath': '/code'},
                 ],
             })
             spec['containers'][0]['env'].append({
-                'name': 'PYTHONPATH', 'value': '/opt/function-deps',
+                'name': 'PYTHONPATH', 'value': '/app/code/site-packages',
             })
-            spec['volumes'].append({'name': 'python-deps', 'emptyDir': {}})
         if self.transport.startswith('unix://'):
             spec['volumes'].append({
                 'name': 'nfd', 'hostPath': {'path': '/var/run/nfd-k8s', 'type': 'Directory'},
