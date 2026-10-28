@@ -63,7 +63,7 @@ class KubernetesBackend:
                   {'name': 'shared', 'mountPath': '/app/shared'},
                   {'name': 'nfd-endpoint', 'mountPath': '/etc/ndn-config'}]
         if runtime == 'python':
-            mounts.append({'name': 'python-deps', 'mountPath': '/opt/function-venv', 'readOnly': True})
+            mounts.append({'name': 'python-deps', 'mountPath': '/opt/function-deps', 'readOnly': True})
         spec = {
             'restartPolicy': 'Never',
             'initContainers': [
@@ -129,18 +129,17 @@ class KubernetesBackend:
                 'image': runtime_image,
                 'command': ['/bin/sh', '-ec'],
                 'args': [
-                    'python3 -m venv --system-site-packages /opt/function-venv; '
-                    '/opt/function-venv/bin/python -m pip install --no-cache-dir '
+                    'python3 -m pip install --no-cache-dir --target /opt/function-deps '
                     '-r /code/requirements.txt',
                 ],
                 'volumeMounts': [
                     {'name': 'code', 'mountPath': '/code', 'readOnly': True},
-                    {'name': 'python-deps', 'mountPath': '/opt/function-venv'},
+                    {'name': 'python-deps', 'mountPath': '/opt/function-deps'},
                 ],
             })
-            spec['containers'][0]['args'][0] = spec['containers'][0]['args'][0].replace(
-                'exec python3 python_interpreter_server.py',
-                'exec /opt/function-venv/bin/python python_interpreter_server.py')
+            spec['containers'][0]['env'].append({
+                'name': 'PYTHONPATH', 'value': '/opt/function-deps',
+            })
             spec['volumes'].append({'name': 'python-deps', 'emptyDir': {}})
         if self.transport.startswith('unix://'):
             spec['volumes'].append({
