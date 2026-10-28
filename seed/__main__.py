@@ -69,24 +69,42 @@ async def run(args):
     app = RoutedNDNApp(face=make_face(args.transport), keychain=KeychainDigest())
     server = SeedServer(app, backend, args.name, args.freshness, args.final)
     loop = asyncio.get_running_loop()
+    stopping = False
+
+    async def shutdown():
+        """Withdraw the NFD route before closing the face used to withdraw it."""
+        nonlocal stopping
+        if stopping:
+            return
+        stopping = True
+        await server.unregister()
+        app.shutdown()
+
+    def request_shutdown():
+        loop.create_task(shutdown())
+
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, app.shutdown)
+        loop.add_signal_handler(sig, request_shutdown)
 
     async def started():
         await server.register()
         if args.timeout is not None:
-            loop.call_later(args.timeout / 1000, app.shutdown)
+            loop.call_later(args.timeout / 1000, request_shutdown)
 
     deadline = loop.time() + args.connect_timeout
-    while True:
-        try:
-            await app.main_loop(after_start=started())
-            break
-        except (FileNotFoundError, ConnectionError, OSError):
-            if loop.time() >= deadline:
-                raise
-            logging.info('Waiting for NFD: %s', args.transport)
-            await asyncio.sleep(0.5)
+    try:
+        while True:
+            try:
+                await app.main_loop(after_start=started())
+                break
+            except (FileNotFoundError, ConnectionError, OSError):
+                if loop.time() >= deadline:
+                    raise
+                logging.info('Waiting for NFD: %s', args.transport)
+                await asyncio.sleep(0.5)
+    finally:
+        if server.registered:
+            await server.unregister()
     if server.tasks:
         await asyncio.gather(*server.tasks)
 

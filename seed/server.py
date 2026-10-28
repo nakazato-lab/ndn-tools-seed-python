@@ -46,11 +46,28 @@ class SeedServer:
         self.active = set()
         self.tasks = set()
         self.lock = asyncio.Lock()
+        self.registered = False
 
     async def register(self):
         if not await self.app.register(self.prefix, self.on_interest, validator=accept_command):
             raise RuntimeError(f'NFD rejected prefix registration: {self.prefix}')
+        self.registered = True
         LOG.info('Registered Seed prefix: %s', self.prefix)
+
+    async def unregister(self):
+        """Remove this Seed's route from NFD while its face is still alive."""
+        if not self.registered:
+            return True
+        try:
+            if not await self.app.unregister(self.prefix):
+                LOG.error('NFD rejected Seed prefix removal: %s', self.prefix)
+                return False
+        except Exception:
+            LOG.exception('Could not remove Seed prefix from NFD: %s', self.prefix)
+            return False
+        self.registered = False
+        LOG.info('Unregistered Seed prefix: %s', self.prefix)
+        return True
 
     def on_interest(self, name, _param, app_param):
         task = asyncio.create_task(self.handle(name, app_param))

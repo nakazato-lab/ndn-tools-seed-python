@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import os
+import signal
 from pathlib import Path
 import grpc
 from ndn.encoding import Name, Component
@@ -21,6 +22,8 @@ class NDNFunction:
         self.app = make_app()
         self.segmented_data = {}
         self.tasks = set()
+        self.prefix = None
+        self.registered = False
         port = os.getenv('GRPC_PORT', '50051')
         self.channel = grpc.insecure_channel(f'localhost:{port}')
         self.stub = function_pb2_grpc.FunctionRuntimeStub(self.channel)
@@ -71,7 +74,40 @@ class NDNFunction:
             detail = exc.details() if isinstance(exc, grpc.RpcError) else str(exc)
             self.app.put_data(name, content=f'Error: {detail}'.encode(), freshness_period=0)
 
-    def run(self, prefix):
+    async def unregister(self):
+        """Remove the function route from NFD before its transport is closed."""
+        if not self.registered:
+            return True
+        try:
+            if not await self.app.unregister(self.prefix):
+                LOG.error('NFD rejected function prefix removal: %s', self.prefix)
+                return False
+        except Exception:
+            LOG.exception('Could not remove function prefix from NFD: %s', self.prefix)
+            return False
+        self.registered = False
+        LOG.info('Function prefix unregistered: %s', self.prefix)
+        return True
+
+    async def _run(self, prefix):
+        self.prefix = prefix
+        loop = asyncio.get_running_loop()
+        stopping = False
+
+        async def shutdown():
+            nonlocal stopping
+            if stopping:
+                return
+            stopping = True
+            await self.unregister()
+            self.app.shutdown()
+
+        def request_shutdown():
+            loop.create_task(shutdown())
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, request_shutdown)
+
         def on_interest(name, param, _app_param):
             task = asyncio.create_task(self.handle(name, param, prefix))
             self.tasks.add(task)
@@ -80,9 +116,15 @@ class NDNFunction:
         async def started():
             if not await self.app.register(prefix, on_interest):
                 raise RuntimeError(f'NFD rejected function prefix: {prefix}')
+            self.registered = True
             LOG.info('Function prefix registered: %s', prefix)
 
         try:
-            self.app.run_forever(after_start=started())
+            await self.app.main_loop(after_start=started())
         finally:
+            if self.registered:
+                await self.unregister()
             self.channel.close()
+
+    def run(self, prefix):
+        asyncio.run(self._run(prefix))
