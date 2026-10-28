@@ -1,6 +1,8 @@
 FROM python:3.12-slim
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 NDN_CLIENT_TRANSPORT=unix:///run/nfd.sock
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
 COPY ndn_routing.py /app/
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
