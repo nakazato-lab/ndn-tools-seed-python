@@ -121,7 +121,7 @@ class KubernetesBackend:
                 {'name': 'nfd-endpoint', 'emptyDir': {}},
             ],
         }
-        if runtime == 'python':
+        if runtime == 'python' and requirements:
             spec['initContainers'].append({
                 'name': 'install-python-dependencies',
                 'image': runtime_image,
