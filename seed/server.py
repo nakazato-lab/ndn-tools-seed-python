@@ -85,16 +85,38 @@ class SeedServer:
         LOG.info('Unregistered Seed prefix: %s', self.prefix)
         return True
 
+    def _send_response(self, name, content):
+        options = {'freshness_period': self.freshness}
+        if self.final:
+            options['final_block_id'] = name[-1]
+        # Echo the entire received Name, including the parameters digest.
+        try:
+            self.app.put_data(name, content=content.encode(), **options)
+        except Exception:
+            LOG.exception('Could not send Seed response')
+
     def on_interest(self, name, _param, app_param):
         task = asyncio.create_task(self.handle(name, app_param))
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
 
     async def handle(self, name, app_param):
+        if app_param is None:
+            async with self.lock:
+                content = ('\n'.join(sorted(self.active)) + '\n') if self.active else 'no server created\n'
+            self._send_response(name, content)
+            return
+
         try:
-            operation = None
-            if app_param is not None:
-                operation, prefix, code, code_ref, runtime, requirements = parse_request(app_param)
+            operation, prefix, code, code_ref, runtime, requirements = parse_request(app_param)
+        except Exception as exc:
+            LOG.exception('Seed request failed')
+            self._send_response(name, f'Error: {exc}')
+            return
+
+        self._send_response(name, 'ACK\n')
+
+        try:
             async with self.lock:
                 if operation == 'CREATE':
                     if code_ref is not None:
@@ -111,15 +133,5 @@ class SeedServer:
                 elif operation == 'DELETE':
                     await asyncio.to_thread(self.backend.delete, prefix)
                     self.active.discard(prefix)
-                content = ('\n'.join(sorted(self.active)) + '\n') if self.active else 'no server created\n'
-        except Exception as exc:
-            LOG.exception('Seed request failed')
-            content = f'Error: {exc}'
-        options = {'freshness_period': self.freshness}
-        if self.final:
-            options['final_block_id'] = name[-1]
-        # Echo the entire received Name, including the parameters digest.
-        try:
-            self.app.put_data(name, content=content.encode(), **options)
         except Exception:
-            LOG.exception('Could not send Seed response')
+            LOG.exception('Seed request failed')
