@@ -110,7 +110,7 @@ class SeedServer:
         try:
             operation, prefix, code, code_ref, runtime, requirements = parse_request(app_param)
         except Exception as exc:
-            LOG.exception('Seed request failed')
+            LOG.exception('Invalid Seed request')
             self._send_response(name, f'Error: {exc}')
             return
 
@@ -134,4 +134,4 @@ class SeedServer:
                     await asyncio.to_thread(self.backend.delete, prefix)
                     self.active.discard(prefix)
         except Exception:
-            LOG.exception('Seed request failed')
+            LOG.exception('Seed %s failed for %s', operation, prefix)
