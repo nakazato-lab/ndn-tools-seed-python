@@ -64,7 +64,6 @@ class SeedServer:
         self.registered = False
 
     async def register(self):
-        await self.fetcher.start()
         if not await self.app.register(self.prefix, self.on_interest, validator=accept_command):
             raise RuntimeError(f'NFD rejected prefix registration: {self.prefix}')
         self.registered = True
