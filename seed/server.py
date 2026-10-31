@@ -6,7 +6,6 @@ from ndn.encoding import Name
 from segmented_node_wrapper import SegmentedNodeWrapper
 
 LOG = logging.getLogger(__name__)
-SEED_CODE_PREFIX = '/manager/functions'
 
 
 def parse_request(raw):
@@ -57,14 +56,13 @@ class SeedServer:
         self.prefix = prefix
         self.freshness = freshness
         self.final = final
-        self.fetcher = SegmentedNodeWrapper(app, SEED_CODE_PREFIX, serve=False)
+        self.fetcher = SegmentedNodeWrapper(app)
         self.active = set()
         self.tasks = set()
         self.lock = asyncio.Lock()
         self.registered = False
 
     async def register(self):
-        await self.fetcher.start()
         if not await self.app.register(self.prefix, self.on_interest, validator=accept_command):
             raise RuntimeError(f'NFD rejected prefix registration: {self.prefix}')
         self.registered = True
