@@ -1,3 +1,3 @@
 python-ndn==0.5.1
 kubernetes==36.0.3
-segmented-node-wrapper @ git+https://github.com/nakazato-lab/segmented-node-wrapper.git@cc0d5c98f7b7c2b3940a164c7c6987af043cb4ae
+segmented-node-wrapper @ git+https://github.com/nakazato-lab/segmented-node-wrapper.git@7f5dec9645ec7f068fe6673c7215f765dab5edca
