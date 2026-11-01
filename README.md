@@ -2,8 +2,6 @@
 
 ![register](docs/images/register.png)
 
-![get-func](docs/images/get-func.png)
-
 ![get-data](docs/images/get-data.png)
 
 ![reschedule](docs/images/reschedule.png)
