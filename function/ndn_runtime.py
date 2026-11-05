@@ -5,6 +5,7 @@ import json
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+import psutil
 
 LOG = logging.getLogger(__name__)
 
@@ -31,6 +32,15 @@ class DeployedFunction:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
+            try:
+                ndnc_process = psutil.Process(process.pid) # process.pidをpsutilで監視する対象にする
+                memory_bytes = ndnc_process.memory_info().rss
+                LOG.info(
+                    'ndnc memory usage: %.2f MiB',
+                    memory_bytes / 1024 / 1024
+                )
+            except psutil.NoSuchProcess:
+                LOG.warning('ndnc process already exited before memory measurement')
             try:
                 stdout, stderr = await process.communicate()
             finally:
