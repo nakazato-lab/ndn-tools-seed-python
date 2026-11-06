@@ -5,6 +5,6 @@ ENV PYTHONUNBUFFERED=1
 COPY function/requirements.python.txt .
 RUN pip install --no-cache-dir -r requirements.python.txt
 COPY grpc/function_pb2.py grpc/function_pb2_grpc.py ./
-COPY function/python_interpreter_server.py ./
+COPY function/python_interpreter_server.py function/package_receiver.py ./
 
 CMD ["python3", "python_interpreter_server.py", "50051"]

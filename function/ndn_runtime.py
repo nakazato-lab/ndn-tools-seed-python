@@ -1,5 +1,6 @@
 """Execute the published ndnc CLI without importing its parser or interpreter."""
 import asyncio
+import base64
 import logging
 import json
 import tempfile
@@ -12,18 +13,21 @@ LOG = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class DeployedFunction:
     source: str
+    code_path: Path | None = None
 
     @classmethod
-    def load(cls, source):
+    def load(cls, source, code_path=None):
         # Deployment only stores source. ndnc validates it when executed.
-        return cls(source)
+        return cls(source, Path(code_path).resolve() if code_path is not None else None)
 
     async def execute(self, args):
         # Each invocation owns its file, output and process, including during
         # concurrent execution and redeployment.
         with tempfile.TemporaryDirectory(prefix='ndnc-function-') as directory:
-            path = Path(directory) / 'function.ndn'
-            path.write_text(self.source, encoding='utf-8')
+            path = self.code_path
+            if path is None:
+                path = Path(directory) / 'function.ndn'
+                path.write_text(self.source, encoding='utf-8')
             result_path = Path(directory) / 'result.json'
             # No shell: arguments are passed literally, including leading '-'.
             process = await asyncio.create_subprocess_exec(
@@ -49,4 +53,6 @@ class DeployedFunction:
             if stdout:
                 LOG.info('ndnc stdout: %s', stdout.decode('utf-8', errors='replace').rstrip('\n'))
             result = json.loads(result_path.read_text(encoding='utf-8'))
+            if isinstance(result, dict) and result.get('encoding') == 'base64':
+                return base64.b64decode(result['data'], validate=True)
             return '' if result is None else str(result)
