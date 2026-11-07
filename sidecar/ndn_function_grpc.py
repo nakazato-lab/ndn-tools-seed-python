@@ -57,7 +57,9 @@ class NDNFunction:
             response = await asyncio.to_thread(self.stub.ExecuteFunction, request, timeout=20)
             if response.HasField('binary_result'):
                 if response.binary_result:
-                    await self.publisher.publish(Name.to_str(name), response.binary_result, send_packet=True)
+                    # Return the image to the Invoker under the /<function-name>/result prefix.
+                    result_name = Name.normalize(name) + [Component.from_str('result')]
+                    await self.publisher.publish(Name.to_str(result_name), response.binary_result, send_packet=True)
                 else:
                     self.app.put_data(name, content=b'', freshness_period=0)
                 return
