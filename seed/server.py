@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from pathlib import Path
 
 from ndn.encoding import Name
 from segmented_node_wrapper import SegmentedNodeWrapper
@@ -24,6 +25,8 @@ def parse_request(raw):
     code_ref = doc.get('code_ref')
     runtime = doc.get('runtime')
     requirements = doc.get('requirements', [])
+    zip_ref = doc.get('zip_content')
+    source_file = doc.get('source')
     if doc['type'] == 'CREATE':
         if code_ref is not None:
             if not isinstance(code_ref, str) or not code_ref:
@@ -39,7 +42,10 @@ def parse_request(raw):
             raise ValueError('requirements must be a list of nonempty single-line strings')
         if runtime != 'python' and requirements:
             raise ValueError('requirements are supported only for the python runtime')
-    return doc['type'], name, code, code_ref, runtime, requirements
+        if zip_ref:
+            if source_file == '..' or Path(source_file).name != source_file:
+                raise ValueError('source_file must be a filename when zip_content is provided')
+    return doc['type'], name, code, code_ref, runtime, requirements, zip_ref, source_file
 
 
 
@@ -106,7 +112,7 @@ class SeedServer:
             return
 
         try:
-            operation, prefix, code, code_ref, runtime, requirements = parse_request(app_param)
+            operation, prefix, code, code_ref, runtime, requirements, zip_ref, source_file = parse_request(app_param)
         except Exception as exc:
             LOG.exception('Invalid Seed request')
             self._send_response(name, f'Error: {exc}')
@@ -125,8 +131,12 @@ class SeedServer:
                             raise ValueError('function code must be UTF-8 text') from exc
                     if not isinstance(code, str) or not code.strip() or '\x00' in code:
                         raise ValueError('content must be nonempty text without NUL characters')
+                    package = {}
+                    if zip_ref:
+                        package['zip_content'] = await self.fetcher.fetch(zip_ref, must_be_fresh=True)
+                        package['source_file'] = source_file
                     LOG.info('Received %s function: %s', runtime, prefix)
-                    await asyncio.to_thread(self.backend.create, prefix, code, runtime, requirements)
+                    await asyncio.to_thread(self.backend.create, prefix, code, runtime, requirements, **package)
                     self.active.add(prefix)
                 elif operation == 'DELETE':
                     await asyncio.to_thread(self.backend.delete, prefix)
