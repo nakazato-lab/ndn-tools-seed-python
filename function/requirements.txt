@@ -1,5 +1,5 @@
 grpcio>=1.71.0
 protobuf
 # Requires explicit return values and the --result-file CLI option.
-ndnc==0.0.10
+ndnc==0.0.11
 segmented-node-wrapper @ https://github.com/nakazato-lab/segmented-node-wrapper/archive/46454ca3df3f2add461b77e20c0627c27a0d90e7.zip
