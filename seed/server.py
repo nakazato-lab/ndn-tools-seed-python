@@ -42,9 +42,12 @@ def parse_request(raw):
             raise ValueError('requirements must be a list of nonempty single-line strings')
         if runtime != 'python' and requirements:
             raise ValueError('requirements are supported only for the python runtime')
-        if zip_ref:
-            if source_file == '..' or Path(source_file).name != source_file:
-                raise ValueError('source_file must be a filename when zip_content is provided')
+        if zip_ref is not None:
+            if not isinstance(zip_ref, str) or not zip_ref.strip():
+                raise ValueError('zip_content must be a nonempty name')
+            if (not isinstance(source_file, str) or not source_file.strip()
+                    or source_file in ('.', '..') or Path(source_file).name != source_file):
+                raise ValueError('source must be a filename when zip_content is provided')
     return doc['type'], name, code, code_ref, runtime, requirements, zip_ref, source_file
 
 
