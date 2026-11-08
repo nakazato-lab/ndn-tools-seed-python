@@ -7,4 +7,5 @@ COPY ndn_routing.py /app/
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY seed ./seed
+COPY grpc/function_pb2.py grpc/function_pb2_grpc.py ./
 ENTRYPOINT ["python", "-m", "seed"]

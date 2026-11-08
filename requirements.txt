@@ -1,3 +1,5 @@
 python-ndn==0.5.1
 kubernetes==36.0.3
+grpcio>=1.71.0
+protobuf
 segmented-node-wrapper @ git+https://github.com/nakazato-lab/segmented-node-wrapper.git@7f5dec9645ec7f068fe6673c7215f765dab5edca

@@ -4,6 +4,7 @@ package function;
 
 service FunctionRuntime {
   rpc ExecuteFunction (FunctionRequest) returns (FunctionResponse);
+  rpc UploadPackage (PackageRequest) returns (PackageResponse);
 }
 
 message FunctionRequest {
@@ -13,4 +14,11 @@ message FunctionRequest {
 
 message FunctionResponse {
   string result = 1;
+  optional bytes binary_result = 2;
 }
+
+message PackageRequest {
+  bytes zip_content = 1;
+}
+
+message PackageResponse {}

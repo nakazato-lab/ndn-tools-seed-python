@@ -9,21 +9,28 @@ import grpc
 import function_pb2
 import function_pb2_grpc
 from ndn_runtime import DeployedFunction
+from package_receiver import PackageReceiver
 
 LOG = logging.getLogger(__name__)
 
 
-class FunctionRuntimeServicer(function_pb2_grpc.FunctionRuntimeServicer):
-    def __init__(self, code_path):
+class FunctionRuntimeServicer(PackageReceiver, function_pb2_grpc.FunctionRuntimeServicer):
+    def __init__(self, code_path, package_required=False):
+        PackageReceiver.__init__(self, code_path, package_required)
         source = Path(code_path).read_text(encoding='utf-8')
-        self.function = DeployedFunction.load(source)
+        self.function = DeployedFunction.load(source, code_path=code_path)
         LOG.info('Loaded .ndn source from %s (%d bytes)', code_path, len(source.encode('utf-8')))
 
     async def ExecuteFunction(self, request, context):
+        if not self.package_ready:
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, 'Function package has not been uploaded')
         try:
             remaining = context.time_remaining()
             async with asyncio.timeout(min(remaining, 20) if remaining is not None else 20):
                 result = await self.function.execute(list(request.args))
+            if isinstance(result, bytes):
+                LOG.info('Executed %s: binary result (%d bytes)', request.name, len(result))
+                return function_pb2.FunctionResponse(binary_result=result)
             LOG.info('Executed %s: result=%r', request.name, result)
             return function_pb2.FunctionResponse(result=result)
         except TimeoutError:
@@ -34,8 +41,9 @@ class FunctionRuntimeServicer(function_pb2_grpc.FunctionRuntimeServicer):
 
 
 async def serve(port, code_path):
-    server = grpc.aio.server()
-    function_pb2_grpc.add_FunctionRuntimeServicer_to_server(FunctionRuntimeServicer(code_path), server)
+    server = grpc.aio.server(options=[('grpc.max_receive_message_length', -1)])
+    function_pb2_grpc.add_FunctionRuntimeServicer_to_server(
+        FunctionRuntimeServicer(code_path, package_required=os.getenv('FUNCTION_PACKAGE_REQUIRED') == '1'), server)
     if not server.add_insecure_port(f'0.0.0.0:{port}'):
         raise RuntimeError(f'Cannot bind gRPC port {port}')
     stop = asyncio.Event()

@@ -10,16 +10,19 @@ from pathlib import Path
 import grpc
 import function_pb2
 import function_pb2_grpc
+from package_receiver import PackageReceiver
 
 LOG = logging.getLogger(__name__)
 
 
-class PythonFunctionServicer(function_pb2_grpc.FunctionRuntimeServicer):
-    def __init__(self, code_path):
-        self.code_path = code_path
+class PythonFunctionServicer(PackageReceiver, function_pb2_grpc.FunctionRuntimeServicer):
+    def __init__(self, code_path, package_required=False):
+        PackageReceiver.__init__(self, code_path, package_required)
         LOG.info('Loaded .py source from %s (%d bytes)', code_path, Path(code_path).stat().st_size)
 
     async def ExecuteFunction(self, request, context):
+        if not self.package_ready:
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, 'Function package has not been uploaded')
         try:
             completed = await asyncio.to_thread(
                 subprocess.run,
@@ -44,8 +47,9 @@ class PythonFunctionServicer(function_pb2_grpc.FunctionRuntimeServicer):
 
 
 async def serve(port, code_path):
-    server = grpc.aio.server()
-    function_pb2_grpc.add_FunctionRuntimeServicer_to_server(PythonFunctionServicer(code_path), server)
+    server = grpc.aio.server(options=[('grpc.max_receive_message_length', -1)])
+    function_pb2_grpc.add_FunctionRuntimeServicer_to_server(
+        PythonFunctionServicer(code_path, package_required=os.getenv('FUNCTION_PACKAGE_REQUIRED') == '1'), server)
     if not server.add_insecure_port(f'0.0.0.0:{port}'):
         raise RuntimeError(f'Cannot bind gRPC port {port}')
     stop = asyncio.Event()

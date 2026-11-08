@@ -8,6 +8,7 @@ import grpc
 from ndn.encoding import Name, Component
 import function_pb2
 import function_pb2_grpc
+from segmented_node_wrapper import SegmentedNodeWrapper
 from ndn_transport import make_app
 from lib.ndn_utils import (
     SEGMENT_SIZE, extract_function_args, extract_function_name,
@@ -24,8 +25,10 @@ class NDNFunction:
         self.tasks = set()
         self.prefix = None
         self.registered = False
+        self.publisher = SegmentedNodeWrapper(self.app, serve=True)
         port = os.getenv('GRPC_PORT', '50051')
-        self.channel = grpc.insecure_channel(f'localhost:{port}')
+        self.channel = grpc.insecure_channel(
+            f'localhost:{port}', options=[('grpc.max_receive_message_length', -1)])
         self.stub = function_pb2_grpc.FunctionRuntimeStub(self.channel)
 
     async def handle(self, name, param, prefix):
@@ -52,6 +55,14 @@ class NDNFunction:
                      original_str, args)
             # Keep the NDN loop available for data fetches and nested calls.
             response = await asyncio.to_thread(self.stub.ExecuteFunction, request, timeout=20)
+            if response.HasField('binary_result'):
+                if response.binary_result:
+                    # Return the image to the Invoker under the /<function-name>/result prefix.
+                    result_name = Name.normalize(name) + [Component.from_str('result')]
+                    await self.publisher.publish(Name.to_str(result_name), response.binary_result, send_packet=True)
+                else:
+                    self.app.put_data(name, content=b'', freshness_period=0)
+                return
             content = response.result.encode()
             LOG.info('Function execution completed: name=%s result=%r', original_str, response.result)
             if not param.can_be_prefix:
