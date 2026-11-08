@@ -24,6 +24,8 @@ class FunctionRuntimeServicer(PackageReceiver, function_pb2_grpc.FunctionRuntime
     async def ExecuteFunction(self, request, context):
         if not self.package_ready:
             await context.abort(grpc.StatusCode.FAILED_PRECONDITION, 'Function package has not been uploaded')
+        if request.HasField('binary_input'):
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, 'Binary arguments require the Python runtime')
         try:
             remaining = context.time_remaining()
             async with asyncio.timeout(min(remaining, 20) if remaining is not None else 20):

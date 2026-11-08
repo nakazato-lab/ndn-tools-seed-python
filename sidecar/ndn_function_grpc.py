@@ -1,8 +1,10 @@
 """Forward NDN function requests to the gRPC runtime on the same Pod."""
 import asyncio
+import json
 import logging
 import os
 import signal
+from uuid import uuid4
 from pathlib import Path
 import grpc
 from ndn.encoding import Name, Component
@@ -28,10 +30,11 @@ class NDNFunction:
         self.publisher = SegmentedNodeWrapper(self.app, serve=True)
         port = os.getenv('GRPC_PORT', '50051')
         self.channel = grpc.insecure_channel(
-            f'localhost:{port}', options=[('grpc.max_receive_message_length', -1)])
+            f'localhost:{port}', options=[('grpc.max_receive_message_length', -1),
+                                         ('grpc.max_send_message_length', -1)])
         self.stub = function_pb2_grpc.FunctionRuntimeStub(self.channel)
 
-    async def handle(self, name, param, prefix):
+    async def handle(self, name, param, prefix, app_param=None):
         try:
             original = get_original_name(name)
             original_str = Name.to_str(original)
@@ -50,13 +53,28 @@ class NDNFunction:
                 LOG.info('Returned function code: name=%s bytes=%d', original_str, len(source))
                 return
             args = [arg for arg in extract_function_args(original) if arg]
+            parameters = json.loads(bytes(app_param)) if app_param else {}
+            image_ref = parameters.get('image_ref')
+            # The image name is for readability; the bytes are passed through stdin.
+            if image_ref in args:
+                args.remove(image_ref)
             request = function_pb2.FunctionRequest(name=extract_function_name(original), args=args)
+            if image_ref:
+                # Fetch the image argument from ndnc running on the Invoker
+                # and pass it to the Function via gRPC.
+                request.binary_input = await SegmentedNodeWrapper(self.app).fetch(image_ref, must_be_fresh=True)
             LOG.info('Execution request: %s; forwarding to Function container via gRPC, args=%r',
                      original_str, args)
             # Keep the NDN loop available for data fetches and nested calls.
             response = await asyncio.to_thread(self.stub.ExecuteFunction, request, timeout=20)
             if response.HasField('binary_result'):
                 if response.binary_result:
+                    if image_ref:
+                        result_name = f'{prefix}/result/{uuid4().hex}'
+                        # Publish the processed image and return its reference to the Invoker.
+                        reference = await self.publisher.publish(result_name, response.binary_result)
+                        self.app.put_data(name, content=json.dumps({'image_ref': reference}).encode('utf-8'), freshness_period=0)
+                        return
                     # Return the image to the Invoker under the /<function-name>/result prefix.
                     result_name = Name.normalize(name) + [Component.from_str('result')]
                     await self.publisher.publish(Name.to_str(result_name), response.binary_result, send_packet=True)
@@ -119,8 +137,8 @@ class NDNFunction:
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, request_shutdown)
 
-        def on_interest(name, param, _app_param):
-            task = asyncio.create_task(self.handle(name, param, prefix))
+        def on_interest(name, param, app_param):
+            task = asyncio.create_task(self.handle(name, param, prefix, app_param))
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
 
