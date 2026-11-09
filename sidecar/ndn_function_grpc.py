@@ -14,6 +14,7 @@ import function_pb2
 import function_pb2_grpc
 from segmented_node_wrapper import SegmentedNodeWrapper
 from ndn_transport import make_app
+from tracing import startup_context
 from lib.ndn_utils import extract_function_args, extract_function_name
 
 LOG = logging.getLogger(__name__)
@@ -131,10 +132,12 @@ class NDNFunction:
             task.add_done_callback(self.tasks.discard)
 
         async def started():
-            if not await self.app.register(prefix, on_interest):
-                raise RuntimeError(f'NFD rejected function prefix: {prefix}')
-            self.registered = True
-            LOG.info('Function prefix registered: %s', prefix)
+            with tracer.start_as_current_span('sidecar.register', context=startup_context(),
+                                             attributes={'ndn.function.name': prefix}):
+                if not await self.app.register(prefix, on_interest):
+                    raise RuntimeError(f'NFD rejected function prefix: {prefix}')
+                self.registered = True
+                LOG.info('Function prefix registered: %s', prefix)
 
         try:
             await self.app.main_loop(after_start=started())

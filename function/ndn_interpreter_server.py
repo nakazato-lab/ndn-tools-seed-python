@@ -4,13 +4,13 @@ import logging
 import os
 import signal
 import sys
-from pathlib import Path
 import grpc
 import function_pb2
 import function_pb2_grpc
 from ndn_runtime import DeployedFunction
 from package_receiver import PackageReceiver
-from tracing import setup_tracing, function_span
+from opentelemetry import trace
+from tracing import setup_tracing, function_span, startup_context
 
 LOG = logging.getLogger(__name__)
 
@@ -18,9 +18,14 @@ LOG = logging.getLogger(__name__)
 class FunctionRuntimeServicer(PackageReceiver, function_pb2_grpc.FunctionRuntimeServicer):
     def __init__(self, code_path, package_required=False):
         PackageReceiver.__init__(self, code_path, package_required)
-        source = Path(code_path).read_text(encoding='utf-8')
-        self.function = DeployedFunction.load(source, code_path=code_path)
-        LOG.info('Loaded .ndn source from %s (%d bytes)', code_path, len(source.encode('utf-8')))
+        self.function = None
+        if not package_required:
+            self.load_source()
+
+    def load_source(self):
+        source = self.code_path.read_text(encoding='utf-8')
+        self.function = DeployedFunction.load(source, code_path=self.code_path)
+        LOG.info('Loaded .ndn source from %s (%d bytes)', self.code_path, len(source.encode('utf-8')))
 
     async def ExecuteFunction(self, request, context):
         with function_span(request, context):
@@ -48,15 +53,17 @@ async def serve(port, code_path):
     provider = setup_tracing('function')
     server = grpc.aio.server(options=[('grpc.max_receive_message_length', -1)])
     try:
-        function_pb2_grpc.add_FunctionRuntimeServicer_to_server(
-            FunctionRuntimeServicer(code_path, package_required=os.getenv('FUNCTION_PACKAGE_REQUIRED') == '1'), server)
-        if not server.add_insecure_port(f'0.0.0.0:{port}'):
-            raise RuntimeError(f'Cannot bind gRPC port {port}')
+        with trace.get_tracer(__name__).start_as_current_span(
+                'function.startup', context=startup_context()):
+            runtime = FunctionRuntimeServicer(code_path, package_required=os.getenv('FUNCTION_PACKAGE_REQUIRED') == '1')
+            function_pb2_grpc.add_FunctionRuntimeServicer_to_server(runtime, server)
+            if not server.add_insecure_port(f'0.0.0.0:{port}'):
+                raise RuntimeError(f'Cannot bind gRPC port {port}')
+            await server.start()
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, stop.set)
-        await server.start()
         LOG.info('ndnc CLI runtime listening on %s', port)
         try:
             await stop.wait()
