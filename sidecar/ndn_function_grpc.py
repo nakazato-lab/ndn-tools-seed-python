@@ -7,23 +7,22 @@ import signal
 from uuid import uuid4
 from pathlib import Path
 import grpc
-from ndn.encoding import Name, Component
+from ndn.encoding import Name
+from opentelemetry import trace
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 import function_pb2
 import function_pb2_grpc
 from segmented_node_wrapper import SegmentedNodeWrapper
 from ndn_transport import make_app
-from lib.ndn_utils import (
-    SEGMENT_SIZE, extract_function_args, extract_function_name,
-    get_original_name,
-)
+from lib.ndn_utils import extract_function_args, extract_function_name
 
 LOG = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 class NDNFunction:
     def __init__(self):
         self.app = make_app()
-        self.segmented_data = {}
         self.tasks = set()
         self.prefix = None
         self.registered = False
@@ -36,15 +35,9 @@ class NDNFunction:
 
     async def handle(self, name, param, prefix, app_param=None):
         try:
-            original = get_original_name(name)
+            original = Name.normalize(name)
             original_str = Name.to_str(original)
             LOG.info('Received Interest: %s', Name.to_str(name))
-            if Component.get_type(name[-1]) == Component.TYPE_SEGMENT:
-                segment = Component.to_number(name[-1])
-                packets = self.segmented_data[original_str]
-                self.app.put_raw_packet(packets[segment])
-                LOG.info('Returned cached Data segment: name=%s segment=%d', original_str, segment)
-                return
             if original == Name.normalize(prefix + '/code'):
                 LOG.info('Code request: %s; serving source without executing the function', original_str)
                 # ndnc clients fetch source before deciding where to execute.
@@ -54,50 +47,45 @@ class NDNFunction:
                 return
             args = [arg for arg in extract_function_args(original) if arg]
             parameters = json.loads(bytes(app_param)) if app_param else {}
-            image_ref = parameters.get('image_ref')
-            # The image name is for readability; the bytes are passed through stdin.
-            if image_ref in args:
-                args.remove(image_ref)
-            request = function_pb2.FunctionRequest(name=extract_function_name(original), args=args)
-            if image_ref:
-                # Fetch the image argument from ndnc running on the Invoker
-                # and pass it to the Function via gRPC.
-                request.binary_input = await SegmentedNodeWrapper(self.app).fetch(image_ref, must_be_fresh=True)
-            LOG.info('Execution request: %s; forwarding to Function container via gRPC, args=%r',
-                     original_str, args)
-            # Keep the NDN loop available for data fetches and nested calls.
-            response = await asyncio.to_thread(self.stub.ExecuteFunction, request, timeout=20)
-            if response.HasField('binary_result'):
-                if response.binary_result:
-                    if image_ref:
-                        result_name = f'{prefix}/result/{uuid4().hex}'
-                        # Publish the processed image and return its reference to the Invoker.
-                        reference = await self.publisher.publish(result_name, response.binary_result)
-                        self.app.put_data(name, content=json.dumps({'image_ref': reference}).encode('utf-8'), freshness_period=0)
-                        return
-                    # Return the image to the Invoker under the /<function-name>/result prefix.
-                    result_name = Name.normalize(name) + [Component.from_str('result')]
-                    await self.publisher.publish(Name.to_str(result_name), response.binary_result, send_packet=True)
+            # Restore the parent context from traceparent and tracestate in ApplicationParameters.
+            # Other keys, such as image_ref, are ignored and parameters is left unchanged.
+            parent = TraceContextTextMapPropagator().extract(parameters)
+            with tracer.start_as_current_span('sidecar.handler', context=parent, kind=trace.SpanKind.SERVER,
+                                             attributes={'ndn.name': original_str, 'ndn.function.name': prefix}):
+                image_ref = parameters.get('image_ref')
+                # The image name is for readability; the bytes are passed through stdin.
+                if image_ref in args:
+                    args.remove(image_ref)
+                request = function_pb2.FunctionRequest(name=extract_function_name(original), args=args)
+                if image_ref:
+                    # Fetch the image argument from ndnc running on the Invoker
+                    # and pass it to the Function via gRPC.
+                    with tracer.start_as_current_span('sidecar.fetch.arg_image', attributes={'ndn.name': image_ref}):
+                        request.binary_input = await SegmentedNodeWrapper(self.app).fetch(image_ref, must_be_fresh=True)
+                LOG.info('Execution request: %s; forwarding to Function container via gRPC, args=%r',
+                         original_str, args)
+                # Keep the NDN loop available for data fetches and nested calls.
+                with tracer.start_as_current_span('sidecar.grpc.execute_func', kind=trace.SpanKind.CLIENT):
+                    carrier = {}
+                    TraceContextTextMapPropagator().inject(carrier)
+                    response = await asyncio.to_thread(
+                        self.stub.ExecuteFunction, request, timeout=20, metadata=list(carrier.items()))
+                if response.HasField('binary_result'):
+                    content = response.binary_result
+                    reference_key = 'image_ref'
                 else:
+                    content = response.result.encode('utf-8')
+                    reference_key = 'result_ref'
+                # The wrapper requires nonempty content; preserve empty execution results.
+                if not content:
                     self.app.put_data(name, content=b'', freshness_period=0)
-                return
-            content = response.result.encode()
-            LOG.info('Function execution completed: name=%s result=%r', original_str, response.result)
-            if not param.can_be_prefix:
-                # ndn-compiler uses exact-name Interests for remote execution.
-                self.app.put_data(name, content=content, freshness_period=0)
-                LOG.info('Returned result Data: name=%s bytes=%d', original_str, len(content))
-                return
-            count = max(1, (len(content) + SEGMENT_SIZE - 1) // SEGMENT_SIZE)
-            packets = [self.app.prepare_data(
-                original + [Component.from_segment(i)],
-                content=content[i * SEGMENT_SIZE:(i + 1) * SEGMENT_SIZE],
-                freshness_period=10000, final_block_id=Component.from_segment(count - 1),
-            ) for i in range(count)]
-            self.segmented_data[original_str] = packets
-            self.app.put_raw_packet(packets[0])
-            LOG.info('Returned first result Data segment: name=%s segments=%d bytes=%d',
-                     original_str, count, len(content))
+                    return
+                result_name = f'{prefix}/result/{uuid4().hex}'
+                # Publish the execution result and return its reference to the Invoker.
+                with tracer.start_as_current_span('sidecar.publish.result', attributes={
+                        'ndn.name': result_name, 'ndn.content.bytes': len(content)}):
+                    reference = await self.publisher.publish(result_name, content)
+                self.app.put_data(name, content=json.dumps({reference_key: reference}).encode('utf-8'), freshness_period=0)
         except Exception as exc:
             LOG.exception('Function request failed')
             detail = exc.details() if isinstance(exc, grpc.RpcError) else str(exc)
