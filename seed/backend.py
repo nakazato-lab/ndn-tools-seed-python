@@ -127,6 +127,11 @@ class KubernetesBackend:
                 {'name': 'nfd-endpoint', 'emptyDir': {}},
             ],
         }
+        for container in spec['containers']:
+            container['env'].append({
+                'name': 'OTEL_EXPORTER_OTLP_ENDPOINT',
+                'value': os.getenv('OTEL_EXPORTER_OTLP_ENDPOINT', 'http://jaeger.jaeger.svc.cluster.local:4318'),
+            })
         if zip_content is not None:
             function = spec['containers'][0]
             function['env'].append({'name': 'FUNCTION_PACKAGE_REQUIRED', 'value': '1'})
