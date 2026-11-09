@@ -130,15 +130,19 @@ class SeedServer:
         self._send_response(name, 'ACK\n')
 
         try:
-            with tracer.start_as_current_span(f'seed.{operation.lower()}', context=parent, kind=trace.SpanKind.SERVER,
-                                             attributes={'ndn.function.name': prefix}):
-                async with self.lock:
+            async with self.lock:
+                with tracer.start_as_current_span(f'seed.{operation.lower()}', context=parent, kind=trace.SpanKind.SERVER,
+                                                 attributes={'ndn.function.name': prefix}):
                     if operation == 'CREATE':
-                        await self._create_function(prefix, code, code_ref, runtime, requirements, zip_ref, source_file)
-                        self.active.add(prefix)
+                        pod_name, package = await self._create_function(
+                            prefix, code, code_ref, runtime, requirements, zip_ref, source_file)
                     elif operation == 'DELETE':
                         await asyncio.to_thread(self.backend.delete, prefix)
                         self.active.discard(prefix)
+                if operation == 'CREATE':
+                    if pod_name is not None:
+                        await asyncio.to_thread(self.backend.finish_create, prefix, pod_name, package.get('zip_content'))
+                    self.active.add(prefix)
         except Exception:
             LOG.exception('Seed %s failed for %s', operation, prefix)
 
@@ -152,7 +156,8 @@ class SeedServer:
         else:
             code = await self._load_code(code, code_ref)
         LOG.info('Received %s function: %s', runtime, prefix)
-        await asyncio.to_thread(self.backend.create, prefix, code, runtime, requirements, **package)
+        pod_name = await asyncio.to_thread(self.backend.create, prefix, code, runtime, requirements, **package)
+        return pod_name, package
 
     async def _load_code(self, code, code_ref):
         if code_ref is not None:
