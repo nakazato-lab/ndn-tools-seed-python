@@ -1,4 +1,4 @@
-"""gRPC bridge to `ndnc run source.ndn ARG ...`."""
+"""gRPC bridge to the in-process ndn-interpreter runtime."""
 import asyncio
 import logging
 import os
@@ -61,7 +61,7 @@ async def serve(port, code_path):
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, stop.set)
-        LOG.info('ndnc CLI runtime listening on %s', port)
+        LOG.info('NDN interpreter runtime listening on %s', port)
         try:
             await stop.wait()
         finally:
