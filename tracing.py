@@ -30,11 +30,3 @@ def function_span(request, context):
             'function.execute', context=parent, kind=trace.SpanKind.SERVER,
             attributes={'ndn.function.name': request.name}):
         yield
-
-
-def startup_context():
-    # Startup context comes from the environment set by Seed during Pod creation.
-    return TraceContextTextMapPropagator().extract({
-        'traceparent': os.getenv('TRACEPARENT', ''),
-        'tracestate': os.getenv('TRACESTATE', ''),
-    }, context=Context())

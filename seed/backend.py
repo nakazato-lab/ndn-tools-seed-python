@@ -10,7 +10,6 @@ import function_pb2
 import function_pb2_grpc
 from kubernetes import client, config
 from opentelemetry import trace
-from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 tracer = trace.get_tracer(__name__)
 
@@ -133,14 +132,11 @@ class KubernetesBackend:
         }
         if zip_content is None:
             spec['initContainers'][1]['env'].append({'name': 'FUNCTION_CODE', 'value': code.replace('$', '$$')})
-        carrier = {}
-        TraceContextTextMapPropagator().inject(carrier)
         for container in spec['containers']:
             container['env'].append({
                 'name': 'OTEL_EXPORTER_OTLP_ENDPOINT',
                 'value': os.getenv('OTEL_EXPORTER_OTLP_ENDPOINT', 'http://jaeger.jaeger.svc.cluster.local:4318'),
             })
-            container['env'].extend({'name': key.upper(), 'value': value} for key, value in carrier.items())
         if zip_content is not None:
             function = spec['containers'][0]
             function['env'].append({'name': 'FUNCTION_PACKAGE_REQUIRED', 'value': '1'})
@@ -187,19 +183,18 @@ class KubernetesBackend:
         manifest = self._get_pod_manifest(prefix, code, runtime, requirements, zip_content, source_file)
         with tracer.start_as_current_span('seed.create.pod', attributes={'k8s.pod.name': manifest['metadata']['name']}):
             self.api.create_namespaced_pod(self.namespace, manifest, _request_timeout=10)
+        return manifest['metadata']['name']
+
+    def finish_create(self, prefix, pod_name, zip_content=None):
         try:
             if zip_content is not None:
-                self._upload_package(manifest['metadata']['name'], zip_content)
+                self._upload_package(pod_name, zip_content)
         except Exception:
-            self.api.delete_namespaced_pod(manifest['metadata']['name'], self.namespace)
+            self.api.delete_namespaced_pod(pod_name, self.namespace)
             raise
         self._delete_old_function_pods(prefix)
 
-    @tracer.start_as_current_span('seed.upload.package')
     def _upload_package(self, pod_name, zip_content):
-        trace.get_current_span().set_attribute('k8s.pod.name', pod_name)
-        carrier = {}
-        TraceContextTextMapPropagator().inject(carrier)
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
             pod = self.api.read_namespaced_pod(pod_name, self.namespace, _request_timeout=10)
@@ -212,8 +207,7 @@ class KubernetesBackend:
                     stub = function_pb2_grpc.FunctionRuntimeStub(channel)
                     stub.UploadPackage(
                         function_pb2.PackageRequest(zip_content=zip_content),
-                        timeout=max(0, deadline - time.monotonic()), wait_for_ready=True,
-                        metadata=list(carrier.items()))
+                        timeout=max(0, deadline - time.monotonic()), wait_for_ready=True)
                 return
             time.sleep(1)
         raise TimeoutError(f'Timed out waiting for function Pod: {pod_name}')

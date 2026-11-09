@@ -9,8 +9,7 @@ import function_pb2
 import function_pb2_grpc
 from ndn_runtime import DeployedFunction
 from package_receiver import PackageReceiver
-from opentelemetry import trace
-from tracing import setup_tracing, function_span, startup_context
+from tracing import setup_tracing, function_span
 
 LOG = logging.getLogger(__name__)
 
@@ -53,13 +52,11 @@ async def serve(port, code_path):
     provider = setup_tracing('function')
     server = grpc.aio.server(options=[('grpc.max_receive_message_length', -1)])
     try:
-        with trace.get_tracer(__name__).start_as_current_span(
-                'function.startup', context=startup_context()):
-            runtime = FunctionRuntimeServicer(code_path, package_required=os.getenv('FUNCTION_PACKAGE_REQUIRED') == '1')
-            function_pb2_grpc.add_FunctionRuntimeServicer_to_server(runtime, server)
-            if not server.add_insecure_port(f'0.0.0.0:{port}'):
-                raise RuntimeError(f'Cannot bind gRPC port {port}')
-            await server.start()
+        runtime = FunctionRuntimeServicer(code_path, package_required=os.getenv('FUNCTION_PACKAGE_REQUIRED') == '1')
+        function_pb2_grpc.add_FunctionRuntimeServicer_to_server(runtime, server)
+        if not server.add_insecure_port(f'0.0.0.0:{port}'):
+            raise RuntimeError(f'Cannot bind gRPC port {port}')
+        await server.start()
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
