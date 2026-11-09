@@ -5,14 +5,13 @@ import os
 import signal
 import subprocess
 import sys
-from pathlib import Path
 
 import grpc
 import function_pb2
 import function_pb2_grpc
 from package_receiver import PackageReceiver
 from opentelemetry import trace
-from tracing import setup_tracing, function_span
+from tracing import setup_tracing, function_span, startup_context
 
 LOG = logging.getLogger(__name__)
 
@@ -20,7 +19,11 @@ LOG = logging.getLogger(__name__)
 class PythonFunctionServicer(PackageReceiver, function_pb2_grpc.FunctionRuntimeServicer):
     def __init__(self, code_path, package_required=False):
         PackageReceiver.__init__(self, code_path, package_required)
-        LOG.info('Loaded .py source from %s (%d bytes)', code_path, Path(code_path).stat().st_size)
+        if not package_required:
+            self.load_source()
+
+    def load_source(self):
+        LOG.info('Loaded .py source from %s (%d bytes)', self.code_path, self.code_path.stat().st_size)
 
     async def ExecuteFunction(self, request, context):
         with function_span(request, context):
@@ -61,15 +64,17 @@ async def serve(port, code_path):
     provider = setup_tracing('function')
     server = grpc.aio.server(options=[('grpc.max_receive_message_length', -1)])
     try:
-        function_pb2_grpc.add_FunctionRuntimeServicer_to_server(
-            PythonFunctionServicer(code_path, package_required=os.getenv('FUNCTION_PACKAGE_REQUIRED') == '1'), server)
-        if not server.add_insecure_port(f'0.0.0.0:{port}'):
-            raise RuntimeError(f'Cannot bind gRPC port {port}')
+        with trace.get_tracer(__name__).start_as_current_span(
+                'function.startup', context=startup_context()):
+            runtime = PythonFunctionServicer(code_path, package_required=os.getenv('FUNCTION_PACKAGE_REQUIRED') == '1')
+            function_pb2_grpc.add_FunctionRuntimeServicer_to_server(runtime, server)
+            if not server.add_insecure_port(f'0.0.0.0:{port}'):
+                raise RuntimeError(f'Cannot bind gRPC port {port}')
+            await server.start()
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, stop.set)
-        await server.start()
         LOG.info('Python runtime listening on %s', port)
         try:
             await stop.wait()

@@ -12,6 +12,7 @@ from ndn.transport.stream_face import TcpFace, UnixFace
 
 from .backend import KubernetesBackend
 from .server import SeedServer
+from tracing import setup_tracing
 
 
 class RemoteTcpFace(TcpFace):
@@ -112,11 +113,15 @@ async def run(args):
 def main():
     args = arguments()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
+    provider = setup_tracing('seed')
     try:
         asyncio.run(run(args))
     except Exception:
         logging.exception('Seed stopped with an error')
         return 1
+    finally:
+        if provider is not None:
+            provider.shutdown()
     return 0
 
 

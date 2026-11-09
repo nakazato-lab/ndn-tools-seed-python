@@ -9,6 +9,10 @@ import grpc
 import function_pb2
 import function_pb2_grpc
 from kubernetes import client, config
+from opentelemetry import trace
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+tracer = trace.get_tracer(__name__)
 
 
 def get_pod_name(prefix, node_name):
@@ -84,11 +88,11 @@ class KubernetesBackend:
                     'image': runtime_image,
                     'command': ['python3', '-c',
                                 "import json, os; from pathlib import Path; "
-                                f"Path({('/code/' + filename)!r}).write_text(os.environ['FUNCTION_CODE'], encoding='utf-8'); "
+                                f"Path({('/code/' + filename)!r}).write_text(os.environ['FUNCTION_CODE'], encoding='utf-8') "
+                                "if 'FUNCTION_CODE' in os.environ else None; "
                                 "Path('/code/requirements.txt').write_text("
                                 "'\\n'.join(json.loads(os.environ['FUNCTION_REQUIREMENTS'])) + '\\n', encoding='utf-8')"],
                     'env': [
-                        {'name': 'FUNCTION_CODE', 'value': code.replace('$', '$$')},
                         {'name': 'FUNCTION_REQUIREMENTS', 'value': json.dumps(list(requirements))},
                     ],
                     'volumeMounts': [{'name': 'code', 'mountPath': '/code'}],
@@ -127,11 +131,16 @@ class KubernetesBackend:
                 {'name': 'nfd-endpoint', 'emptyDir': {}},
             ],
         }
+        if zip_content is None:
+            spec['initContainers'][1]['env'].append({'name': 'FUNCTION_CODE', 'value': code.replace('$', '$$')})
+        carrier = {}
+        TraceContextTextMapPropagator().inject(carrier)
         for container in spec['containers']:
             container['env'].append({
                 'name': 'OTEL_EXPORTER_OTLP_ENDPOINT',
                 'value': os.getenv('OTEL_EXPORTER_OTLP_ENDPOINT', 'http://jaeger.jaeger.svc.cluster.local:4318'),
             })
+            container['env'].extend({'name': key.upper(), 'value': value} for key, value in carrier.items())
         if zip_content is not None:
             function = spec['containers'][0]
             function['env'].append({'name': 'FUNCTION_PACKAGE_REQUIRED', 'value': '1'})
@@ -166,13 +175,18 @@ class KubernetesBackend:
             'spec': spec,
         }
 
+    @tracer.start_as_current_span('seed.deploy')
     def create(self, prefix, code, runtime, requirements=(), zip_content=None, source_file=None):
+        trace.get_current_span().set_attribute('ndn.function.name', prefix)
+        trace.get_current_span().set_attribute('k8s.node.name', self.node_name or '')
         if not self.node_name:
             raise ValueError('NODE_NAME is required to place a function')
         if self._find_function_pod(prefix) is not None:
+            trace.get_current_span().add_event('seed.pod.reused')
             return
         manifest = self._get_pod_manifest(prefix, code, runtime, requirements, zip_content, source_file)
-        self.api.create_namespaced_pod(self.namespace, manifest, _request_timeout=10)
+        with tracer.start_as_current_span('seed.create.pod', attributes={'k8s.pod.name': manifest['metadata']['name']}):
+            self.api.create_namespaced_pod(self.namespace, manifest, _request_timeout=10)
         try:
             if zip_content is not None:
                 self._upload_package(manifest['metadata']['name'], zip_content)
@@ -181,7 +195,11 @@ class KubernetesBackend:
             raise
         self._delete_old_function_pods(prefix)
 
+    @tracer.start_as_current_span('seed.upload.package')
     def _upload_package(self, pod_name, zip_content):
+        trace.get_current_span().set_attribute('k8s.pod.name', pod_name)
+        carrier = {}
+        TraceContextTextMapPropagator().inject(carrier)
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
             pod = self.api.read_namespaced_pod(pod_name, self.namespace, _request_timeout=10)
@@ -194,7 +212,8 @@ class KubernetesBackend:
                     stub = function_pb2_grpc.FunctionRuntimeStub(channel)
                     stub.UploadPackage(
                         function_pb2.PackageRequest(zip_content=zip_content),
-                        timeout=max(0, deadline - time.monotonic()), wait_for_ready=True)
+                        timeout=max(0, deadline - time.monotonic()), wait_for_ready=True,
+                        metadata=list(carrier.items()))
                 return
             time.sleep(1)
         raise TimeoutError(f'Timed out waiting for function Pod: {pod_name}')
