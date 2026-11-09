@@ -134,27 +134,33 @@ class SeedServer:
                                              attributes={'ndn.function.name': prefix}):
                 async with self.lock:
                     if operation == 'CREATE':
-                        package = {}
-                        if zip_ref:
-                            with tracer.start_as_current_span('seed.fetch.package', attributes={'ndn.name': zip_ref}):
-                                package['zip_content'] = await self.fetcher.fetch(zip_ref, must_be_fresh=True)
-                            package['source_file'] = source_file
-                            code = None
-                        else:
-                            if code_ref is not None:
-                                try:
-                                    with tracer.start_as_current_span('seed.fetch.code', attributes={'ndn.name': code_ref}):
-                                        code = (await self.fetcher.fetch(
-                                            code_ref, must_be_fresh=True)).decode('utf-8')
-                                except UnicodeDecodeError as exc:
-                                    raise ValueError('function code must be UTF-8 text') from exc
-                            if not isinstance(code, str) or not code.strip() or '\x00' in code:
-                                raise ValueError('content must be nonempty text without NUL characters')
-                        LOG.info('Received %s function: %s', runtime, prefix)
-                        await asyncio.to_thread(self.backend.create, prefix, code, runtime, requirements, **package)
+                        await self._create_function(prefix, code, code_ref, runtime, requirements, zip_ref, source_file)
                         self.active.add(prefix)
                     elif operation == 'DELETE':
                         await asyncio.to_thread(self.backend.delete, prefix)
                         self.active.discard(prefix)
         except Exception:
             LOG.exception('Seed %s failed for %s', operation, prefix)
+
+    async def _create_function(self, prefix, code, code_ref, runtime, requirements, zip_ref, source_file):
+        package = {}
+        if zip_ref:
+            with tracer.start_as_current_span('seed.fetch.package', attributes={'ndn.name': zip_ref}):
+                package['zip_content'] = await self.fetcher.fetch(zip_ref, must_be_fresh=True)
+            package['source_file'] = source_file
+            code = None
+        else:
+            code = await self._load_code(code, code_ref)
+        LOG.info('Received %s function: %s', runtime, prefix)
+        await asyncio.to_thread(self.backend.create, prefix, code, runtime, requirements, **package)
+
+    async def _load_code(self, code, code_ref):
+        if code_ref is not None:
+            try:
+                with tracer.start_as_current_span('seed.fetch.code', attributes={'ndn.name': code_ref}):
+                    code = (await self.fetcher.fetch(code_ref, must_be_fresh=True)).decode('utf-8')
+            except UnicodeDecodeError as exc:
+                raise ValueError('function code must be UTF-8 text') from exc
+        if not isinstance(code, str) or not code.strip() or '\x00' in code:
+            raise ValueError('content must be nonempty text without NUL characters')
+        return code
