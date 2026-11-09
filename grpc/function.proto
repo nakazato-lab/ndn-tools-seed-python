@@ -10,6 +10,7 @@ service FunctionRuntime {
 message FunctionRequest {
   string name = 1;
   repeated string args = 2;
+  optional bytes binary_input = 3;
 }
 
 message FunctionResponse {

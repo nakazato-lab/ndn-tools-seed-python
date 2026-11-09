@@ -27,20 +27,27 @@ class PythonFunctionServicer(PackageReceiver, function_pb2_grpc.FunctionRuntimeS
             completed = await asyncio.to_thread(
                 subprocess.run,
                 [sys.executable, self.code_path, *request.args],
+                # Pass the image argument to the Python script through stdin.
+                input=request.binary_input if request.HasField('binary_input') else None,
                 capture_output=True,
-                text=True,
-                errors='replace',
                 timeout=20,
                 check=True,
             )
-            result = completed.stdout.rstrip('\n')
+            if request.HasField('binary_input'):
+                # Return the processed image written to stdout by the Python script.
+                return function_pb2.FunctionResponse(binary_result=completed.stdout)
+            try:
+                result = completed.stdout.decode('utf-8').rstrip('\n')
+            except UnicodeDecodeError:
+                LOG.info('Executed %s: binary result=%d bytes', request.name, len(completed.stdout))
+                return function_pb2.FunctionResponse(binary_result=completed.stdout)
             LOG.info('Executed %s: result=%r', request.name, result)
             return function_pb2.FunctionResponse(result=result)
         except subprocess.TimeoutExpired:
             await context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, 'Function execution timed out')
         except subprocess.CalledProcessError as exc:
             LOG.exception('Function execution failed')
-            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, exc.stderr.strip())
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, exc.stderr.decode('utf-8', errors='replace').strip())
         except Exception as exc:
             LOG.exception('Function execution failed')
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
