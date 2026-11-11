@@ -73,7 +73,11 @@ class NDNFunction:
                         _, _, content = await self.app.express_interest(
                             interest_args[0], app_param=json.dumps(carrier).encode('utf-8') if carrier else None,
                             must_be_fresh=True, can_be_prefix=True, lifetime=20000)
-                        image_ref = json.loads(bytes(content))['image_ref']
+                        raw_content = bytes(content)
+                        if raw_content.startswith(b'Error:'):
+                            raise RuntimeError(
+                                f'{interest_args[0]} failed: {raw_content.decode("utf-8", errors="replace")}')
+                        image_ref = json.loads(raw_content)['image_ref']
                         request.binary_input = await SegmentedNodeWrapper(self.app).fetch(image_ref, must_be_fresh=True)
                 elif image_ref:
                     # Fetch the image argument from ndnc running on the Invoker
