@@ -14,7 +14,10 @@ import function_pb2
 import function_pb2_grpc
 from segmented_node_wrapper import SegmentedNodeWrapper
 from ndn_transport import make_app
-from lib.ndn_utils import extract_function_args, extract_function_name
+from lib.ndn_utils import (
+    decode_and_remove_metadata_from_interest, decode_json_string_argument,
+    extract_function_name, parse_function_args,
+)
 
 LOG = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -45,7 +48,11 @@ class NDNFunction:
                 self.app.put_data(name, content=source, freshness_period=0)
                 LOG.info('Returned function code: name=%s bytes=%d', original_str, len(source))
                 return
-            args = [arg for arg in extract_function_args(original) if arg]
+            decoded_interest = decode_and_remove_metadata_from_interest(original)
+            raw_args = parse_function_args(decoded_interest)
+            # If an argument starts with / without double quotes, act as a Consumer and express an Interest.
+            interest_args = [arg for arg in raw_args if arg.startswith('/')]
+            args = [decode_json_string_argument(arg) for arg in raw_args if arg and not arg.startswith('/')]
             parameters = json.loads(bytes(app_param)) if app_param else {}
             # Restore the parent context from traceparent and tracestate in ApplicationParameters.
             # Other keys, such as image_ref, are ignored and parameters is left unchanged.
@@ -57,7 +64,22 @@ class NDNFunction:
                 if image_ref in args:
                     args.remove(image_ref)
                 request = function_pb2.FunctionRequest(name=extract_function_name(original), args=args)
-                if image_ref:
+                if interest_args:
+                    # Invoke the Producer first, then fetch its image using the returned reference.
+                    with tracer.start_as_current_span('sidecar.fetch.arg_image', kind=trace.SpanKind.CLIENT,
+                                                     attributes={'ndn.name': interest_args[0]}):
+                        carrier = {}
+                        TraceContextTextMapPropagator().inject(carrier)
+                        _, _, content = await self.app.express_interest(
+                            interest_args[0], app_param=json.dumps(carrier).encode('utf-8') if carrier else None,
+                            must_be_fresh=True, can_be_prefix=True, lifetime=20000)
+                        raw_content = bytes(content)
+                        if raw_content.startswith(b'Error:'):
+                            raise RuntimeError(
+                                f'{interest_args[0]} failed: {raw_content.decode("utf-8", errors="replace")}')
+                        image_ref = json.loads(raw_content)['image_ref']
+                        request.binary_input = await SegmentedNodeWrapper(self.app).fetch(image_ref, must_be_fresh=True)
+                elif image_ref:
                     # Fetch the image argument from ndnc running on the Invoker
                     # and pass it to the Function via gRPC.
                     with tracer.start_as_current_span('sidecar.fetch.arg_image', attributes={'ndn.name': image_ref}):
