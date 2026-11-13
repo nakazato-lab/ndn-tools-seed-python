@@ -1,7 +1,7 @@
 grpcio>=1.71.0
 protobuf
 # Uses the parser and asynchronous Interpreter.exec_in_context API.
-ndnc==0.0.14
+ndnc==0.0.15
 segmented-node-wrapper @ https://github.com/nakazato-lab/segmented-node-wrapper/archive/46454ca3df3f2add461b77e20c0627c27a0d90e7.zip
 opentelemetry-api
 opentelemetry-sdk
