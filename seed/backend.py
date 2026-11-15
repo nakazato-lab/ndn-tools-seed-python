@@ -1,6 +1,7 @@
 """Kubernetes backend; all blocking calls run outside the NDN event loop."""
 import hashlib
 import json
+import logging
 import os
 import re
 import time
@@ -12,6 +13,8 @@ from kubernetes import client, config
 from opentelemetry import trace
 
 tracer = trace.get_tracer(__name__)
+LOG = logging.getLogger(__name__)
+MAX_LOG_BYTES = 64 * 1024
 
 
 def get_pod_name(prefix, node_name):
@@ -190,33 +193,116 @@ class KubernetesBackend:
             if zip_content is not None:
                 self._upload_package(pod_name, zip_content)
         except Exception:
-            self.api.delete_namespaced_pod(pod_name, self.namespace)
+            try:
+                self.api.delete_namespaced_pod(pod_name, self.namespace, _request_timeout=10)
+            except Exception:
+                LOG.exception('Could not delete Function Pod after package upload failure: %s', pod_name)
             raise
         self._delete_old_function_pods(prefix)
 
-    def wait_until_running(self, prefix, timeout=120):
-        pod = self._find_function_pod(prefix)
+    def wait_for_placement_result(self, prefix, timeout=120):
+        try:
+            pod = self._find_function_pod(prefix)
+        except Exception as exc:
+            return {
+                'name': prefix, 'node_name': self.node_name, 'phase': 'Unknown',
+                'reason': 'PodStatusUnavailable', 'message': str(exc),
+            }
         if pod is None:
-            raise RuntimeError(f'Function Pod not found: {prefix}')
+            return {
+                'name': prefix, 'node_name': self.node_name, 'phase': 'Unknown',
+                'reason': 'PodNotFound', 'message': 'Function Pod not found',
+            }
+        return self._monitor_function_pod(prefix, pod, timeout)
+
+    def _monitor_function_pod(self, prefix, pod, timeout):
         pod_name = pod.metadata.name
         pod_uid = pod.metadata.uid
         deadline = time.monotonic() + timeout
         while True:
-            pod = self.api.read_namespaced_pod(pod_name, self.namespace, _request_timeout=10)
+            try:
+                pod = self.api.read_namespaced_pod(pod_name, self.namespace, _request_timeout=10)
+            except Exception as exc:
+                return {
+                    'name': prefix, 'pod_name': pod_name, 'node_name': self.node_name, 'phase': 'Unknown',
+                    'reason': 'PodStatusUnavailable', 'message': str(exc),
+                }
+            # Stop monitoring if the original Pod is replaced or being deleted.
             if pod.metadata.uid != pod_uid or pod.metadata.deletion_timestamp:
-                raise RuntimeError(f'Function Pod was replaced or deleted: {pod_name}')
-            if pod.status.phase == 'Running':
-                return pod_name
-            if pod.status.phase in ('Failed', 'Succeeded'):
-                raise RuntimeError(f'Function Pod stopped before Running: {pod_name} ({pod.status.phase})')
-            if time.monotonic() >= deadline:
-                raise TimeoutError(f'Timed out waiting for Function Pod Running: {pod_name} ({pod.status.phase})')
-            time.sleep(1)
+                result = {
+                    'name': prefix, 'pod_name': pod_name, 'node_name': self.node_name,
+                    'phase': 'Unknown', 'reason': 'PodReplacedOrDeleted',
+                    'message': 'Function Pod was replaced or deleted during startup',
+                }
+                return result
+            crash_loop_containers = self._crash_loop_containers(pod)
+            # Pending may be normal startup; wait until the deadline.
+            if (not crash_loop_containers
+                    and pod.status.phase == 'Pending' and time.monotonic() < deadline):
+                time.sleep(1)
+                continue
+
+            return self.collect_placement_result(prefix, pod)
+
+    def collect_placement_result(self, prefix, pod):
+        result = {
+            'name': prefix, 'pod_name': pod.metadata.name, 'node_name': self.node_name,
+            'phase': pod.status.phase or 'Unknown',
+        }
+        crash_loop_containers = self._crash_loop_containers(pod)
+        if crash_loop_containers:
+            result['reason'] = 'CrashLoopBackOff'
+            self._collect_previous_logs(pod.metadata.name, crash_loop_containers, result)
+        elif pod.status.phase == 'Running':
+            return result
+        else:
+            self._collect_events(pod.metadata.uid, result)
+        return result
+
+    def _crash_loop_containers(self, pod):
+        statuses = (pod.status.init_container_statuses or []) + (pod.status.container_statuses or [])
+        return [status for status in statuses
+                if status.state and status.state.waiting
+                and status.state.waiting.reason == 'CrashLoopBackOff']
+
+    def _collect_previous_logs(self, pod_name, containers, result):
+        logs = {}
+        errors = {}
+        remaining = MAX_LOG_BYTES
+        for status in containers:
+            if remaining <= 0:
+                break
+            try:
+                text = self.api.read_namespaced_pod_log(
+                    pod_name, self.namespace, container=status.name, previous=True,
+                    tail_lines=100, limit_bytes=remaining, _request_timeout=2)
+                raw = text.encode('utf-8')[-remaining:]
+                logs[status.name] = raw.decode('utf-8', errors='replace')
+                remaining -= len(raw)
+            except Exception as exc:
+                errors[status.name] = str(exc)
+        if logs:
+            result['logs'] = logs
+        if errors:
+            result['log_errors'] = errors
+
+    def _collect_events(self, pod_uid, result):
+        try:
+            events = self.api.list_namespaced_event(
+                self.namespace, field_selector=f'involvedObject.uid={pod_uid}', _request_timeout=5).items
+            result['events'] = [
+                {'type': event.type, 'reason': event.reason, 'message': event.message, 'count': event.count}
+                for event in events
+            ]
+        except Exception as exc:
+            result['event_error'] = str(exc)
 
     def _upload_package(self, pod_name, zip_content):
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
             pod = self.api.read_namespaced_pod(pod_name, self.namespace, _request_timeout=10)
+            if self._crash_loop_containers(pod):
+                raise RuntimeError(f'Function Pod is in CrashLoopBackOff: {pod_name}')
             if pod.status.phase in ('Failed', 'Succeeded'):
                 raise RuntimeError(f'Function Pod stopped before package upload: {pod_name}')
             address = pod.status.pod_ip

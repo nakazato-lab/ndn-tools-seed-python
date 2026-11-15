@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
+from uuid import uuid4
 
 from ndn.encoding import Name
 from ndn.types import InterestTimeout
@@ -73,6 +74,7 @@ class SeedServer:
         self.freshness = freshness
         self.final = final
         self.fetcher = SegmentedNodeWrapper(app)
+        self.publisher = SegmentedNodeWrapper(app, serve=True)
         self.active = set()
         self.tasks = set()
         self.lock = asyncio.Lock()
@@ -136,16 +138,26 @@ class SeedServer:
             LOG.exception('Seed %s failed for %s', request['type'], request['name'])
 
     async def _apply_request(self, request, parent):
-        async with self.lock:
-            if request['type'] == 'CREATE':
-                await self._deploy_function(request, parent)
-            else:
+        if request['type'] == 'CREATE':
+            result = await self._deploy_and_wait(request, parent)
+            registerer_prefix = request.get('registerer_prefix')
+            if registerer_prefix:
+                await self._notify_placement_result(registerer_prefix, result)
+        else:
+            async with self.lock:
                 await self._delete_function(request['name'], parent)
 
-        registerer_prefix = request.get('registerer_prefix')
-        if request['type'] == 'CREATE' and registerer_prefix:
-            pod_name = await asyncio.to_thread(self.backend.wait_until_running, request['name'])
-            await self._notify_running(registerer_prefix, request['name'], pod_name)
+    async def _deploy_and_wait(self, request, parent):
+        try:
+            async with self.lock:
+                await self._deploy_function(request, parent)
+            return await asyncio.to_thread(self.backend.wait_for_placement_result, request['name'])
+        except Exception as exc:
+            LOG.exception('Function deployment failed: %s', request['name'])
+            return {
+                'name': request['name'], 'node_name': self.backend.node_name,
+                'phase': 'Unknown', 'reason': 'DeploymentError', 'message': str(exc),
+            }
 
     async def _deploy_function(self, request, parent):
         prefix = request['name']
@@ -162,15 +174,14 @@ class SeedServer:
             await asyncio.to_thread(self.backend.delete, prefix)
             self.active.discard(prefix)
 
-    async def _notify_running(self, registerer_prefix, prefix, pod_name):
-        result = {
-            'name': prefix, 'phase': 'Running',
-            'pod_name': pod_name, 'node_name': self.backend.node_name,
-        }
-        LOG.info('Notifying Registerer %s: %s', registerer_prefix, result)
+    async def _notify_placement_result(self, registerer_prefix, result):
+        result_ref = await self.publisher.publish(
+            f'{self.prefix}/results/{uuid4().hex}',
+            json.dumps(result, ensure_ascii=False).encode('utf-8'))
+        LOG.info('Notifying Registerer %s: result_ref=%s', registerer_prefix, result_ref)
         try:
             await self.app.express_interest(
-                registerer_prefix, app_param=json.dumps(result, ensure_ascii=False).encode('utf-8'),
+                registerer_prefix, app_param=json.dumps({'result_ref': result_ref}).encode('utf-8'),
                 must_be_fresh=True, can_be_prefix=False, lifetime=1000)
         except InterestTimeout:
             # Result notifications are one-way; Registerer does not return a Data ACK.
