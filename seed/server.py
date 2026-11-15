@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 
 from ndn.encoding import Name
+from ndn.types import InterestTimeout
 from segmented_node_wrapper import SegmentedNodeWrapper
 from opentelemetry import trace
 from opentelemetry.context import Context
@@ -53,7 +54,8 @@ def parse_request(raw):
             if (not isinstance(source_file, str) or not source_file.strip()
                     or source_file in ('.', '..') or Path(source_file).name != source_file):
                 raise ValueError('source must be a filename when zip_content is provided')
-    return doc['type'], name, code, code_ref, runtime, requirements, zip_ref, source_file
+    doc['name'] = name
+    return doc
 
 
 
@@ -114,14 +116,13 @@ class SeedServer:
 
     async def handle(self, name, app_param):
         if app_param is None:
-            async with self.lock:
-                content = ('\n'.join(sorted(self.active)) + '\n') if self.active else 'no server created\n'
-            self._send_response(name, content)
+            LOG.error('Seed request is missing ApplicationParameters: %s', Name.to_str(name))
+            self._send_response(name, 'ACK\n')
             return
 
         try:
-            operation, prefix, code, code_ref, runtime, requirements, zip_ref, source_file = parse_request(app_param)
-            parent = TraceContextTextMapPropagator().extract(json.loads(bytes(app_param)), context=Context())
+            request = parse_request(app_param)
+            parent = TraceContextTextMapPropagator().extract(request, context=Context())
         except Exception as exc:
             LOG.exception('Invalid Seed request')
             self._send_response(name, f'Error: {exc}')
@@ -130,31 +131,64 @@ class SeedServer:
         self._send_response(name, 'ACK\n')
 
         try:
-            async with self.lock:
-                with tracer.start_as_current_span(f'seed.{operation.lower()}', context=parent, kind=trace.SpanKind.SERVER,
-                                                 attributes={'ndn.function.name': prefix}):
-                    if operation == 'CREATE':
-                        pod_name, package = await self._create_function(
-                            prefix, code, code_ref, runtime, requirements, zip_ref, source_file)
-                    elif operation == 'DELETE':
-                        await asyncio.to_thread(self.backend.delete, prefix)
-                        self.active.discard(prefix)
-                if operation == 'CREATE':
-                    if pod_name is not None:
-                        await asyncio.to_thread(self.backend.finish_create, prefix, pod_name, package.get('zip_content'))
-                    self.active.add(prefix)
+            await self._apply_request(request, parent)
         except Exception:
-            LOG.exception('Seed %s failed for %s', operation, prefix)
+            LOG.exception('Seed %s failed for %s', request['type'], request['name'])
 
-    async def _create_function(self, prefix, code, code_ref, runtime, requirements, zip_ref, source_file):
+    async def _apply_request(self, request, parent):
+        async with self.lock:
+            if request['type'] == 'CREATE':
+                await self._deploy_function(request, parent)
+            else:
+                await self._delete_function(request['name'], parent)
+
+        registerer_prefix = request.get('registerer_prefix')
+        if request['type'] == 'CREATE' and registerer_prefix:
+            pod_name = await asyncio.to_thread(self.backend.wait_until_running, request['name'])
+            await self._notify_running(registerer_prefix, request['name'], pod_name)
+
+    async def _deploy_function(self, request, parent):
+        prefix = request['name']
+        with tracer.start_as_current_span('seed.create', context=parent, kind=trace.SpanKind.SERVER,
+                                         attributes={'ndn.function.name': prefix}):
+            pod_name, package = await self._create_function(request)
+        if pod_name is not None:
+            await asyncio.to_thread(self.backend.finish_create, prefix, pod_name, package.get('zip_content'))
+        self.active.add(prefix)
+
+    async def _delete_function(self, prefix, parent):
+        with tracer.start_as_current_span('seed.delete', context=parent, kind=trace.SpanKind.SERVER,
+                                         attributes={'ndn.function.name': prefix}):
+            await asyncio.to_thread(self.backend.delete, prefix)
+            self.active.discard(prefix)
+
+    async def _notify_running(self, registerer_prefix, prefix, pod_name):
+        result = {
+            'name': prefix, 'phase': 'Running',
+            'pod_name': pod_name, 'node_name': self.backend.node_name,
+        }
+        LOG.info('Notifying Registerer %s: %s', registerer_prefix, result)
+        try:
+            await self.app.express_interest(
+                registerer_prefix, app_param=json.dumps(result, ensure_ascii=False).encode('utf-8'),
+                must_be_fresh=True, can_be_prefix=False, lifetime=1000)
+        except InterestTimeout:
+            # Result notifications are one-way; Registerer does not return a Data ACK.
+            pass
+
+    async def _create_function(self, request):
+        prefix = request['name']
+        runtime = request['runtime']
+        requirements = request.get('requirements', [])
+        zip_ref = request.get('zip_content')
         package = {}
         if zip_ref:
             with tracer.start_as_current_span('seed.fetch.package', attributes={'ndn.name': zip_ref}):
                 package['zip_content'] = await self.fetcher.fetch(zip_ref, must_be_fresh=True)
-            package['source_file'] = source_file
+            package['source_file'] = request['source']
             code = None
         else:
-            code = await self._load_code(code, code_ref)
+            code = await self._load_code(request.get('content'), request.get('code_ref'))
         LOG.info('Received %s function: %s', runtime, prefix)
         pod_name = await asyncio.to_thread(self.backend.create, prefix, code, runtime, requirements, **package)
         return pod_name, package

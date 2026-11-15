@@ -39,7 +39,7 @@ class KubernetesBackend:
         self.api = api
 
     def _find_function_pod(self, prefix):
-        pods = self.api.list_namespaced_pod(self.namespace).items
+        pods = self.api.list_namespaced_pod(self.namespace, _request_timeout=10).items
         # e.g. annotations: ndn-prefix: /average
         for pod in pods:
             annotations = pod.metadata.annotations or {}
@@ -193,6 +193,25 @@ class KubernetesBackend:
             self.api.delete_namespaced_pod(pod_name, self.namespace)
             raise
         self._delete_old_function_pods(prefix)
+
+    def wait_until_running(self, prefix, timeout=120):
+        pod = self._find_function_pod(prefix)
+        if pod is None:
+            raise RuntimeError(f'Function Pod not found: {prefix}')
+        pod_name = pod.metadata.name
+        pod_uid = pod.metadata.uid
+        deadline = time.monotonic() + timeout
+        while True:
+            pod = self.api.read_namespaced_pod(pod_name, self.namespace, _request_timeout=10)
+            if pod.metadata.uid != pod_uid or pod.metadata.deletion_timestamp:
+                raise RuntimeError(f'Function Pod was replaced or deleted: {pod_name}')
+            if pod.status.phase == 'Running':
+                return pod_name
+            if pod.status.phase in ('Failed', 'Succeeded'):
+                raise RuntimeError(f'Function Pod stopped before Running: {pod_name} ({pod.status.phase})')
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f'Timed out waiting for Function Pod Running: {pod_name} ({pod.status.phase})')
+            time.sleep(1)
 
     def _upload_package(self, pod_name, zip_content):
         deadline = time.monotonic() + 120
