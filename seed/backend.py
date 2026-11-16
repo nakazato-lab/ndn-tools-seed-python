@@ -235,9 +235,9 @@ class KubernetesBackend:
                     'message': 'Function Pod was replaced or deleted during startup',
                 }
                 return result
-            crash_loop_containers = self._crash_loop_containers(pod)
+            failed_containers = self._failed_containers(pod)
             # Pending may be normal startup; wait until the deadline.
-            if (not crash_loop_containers
+            if (not failed_containers
                     and pod.status.phase == 'Pending' and time.monotonic() < deadline):
                 time.sleep(1)
                 continue
@@ -249,32 +249,52 @@ class KubernetesBackend:
             'name': prefix, 'pod_name': pod.metadata.name, 'node_name': self.node_name,
             'phase': pod.status.phase or 'Unknown',
         }
-        crash_loop_containers = self._crash_loop_containers(pod)
-        if crash_loop_containers:
-            result['reason'] = 'CrashLoopBackOff'
-            self._collect_previous_logs(pod.metadata.name, crash_loop_containers, result)
+        failed_containers = self._failed_containers(pod)
+        if failed_containers:
+            self._collect_container_error_logs(pod.metadata.name, failed_containers, result)
         elif pod.status.phase == 'Running':
             return result
         else:
             self._collect_events(pod.metadata.uid, result)
         return result
 
-    def _crash_loop_containers(self, pod):
+    def _failed_containers(self, pod):
+        # fields for pod.status: https://github.com/kubernetes-client/python/blob/master/kubernetes/docs/V1PodStatus.md
         statuses = (pod.status.init_container_statuses or []) + (pod.status.container_statuses or [])
-        return [status for status in statuses
-                if status.state and status.state.waiting
-                and status.state.waiting.reason == 'CrashLoopBackOff']
+        failed_containers = []
+        for status in statuses:
+            if self._is_container_failed(status):
+                failed_containers.append(status)
+        return failed_containers
 
-    def _collect_previous_logs(self, pod_name, containers, result):
+    def _is_container_failed(self, status):
+        # fields for ContainerStatus: https://github.com/kubernetes-client/python/blob/master/kubernetes/docs/V1ContainerStatus.md
+        state = status.state
+        if state is None:
+            return False
+        # https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#container-state-waiting
+        if state.waiting and state.waiting.reason == 'CrashLoopBackOff':
+            return True
+        # https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#restart-behavior-comparison
+        if state.terminated and state.terminated.exit_code != 0:
+            return True
+        return False
+
+    def _collect_container_error_logs(self, pod_name, containers, result):
         logs = {}
         errors = {}
         remaining = MAX_LOG_BYTES
         for status in containers:
             if remaining <= 0:
                 break
+            # Use previous logs for CrashLoopBackOff, current logs for terminated containers.
+            if status.state.waiting is not None:
+                previous = True # https://kubernetes.io/docs/tasks/debug/debug-application/debug-running-pod/#examine-pod-logs
+            else:
+                previous = False
             try:
                 text = self.api.read_namespaced_pod_log(
-                    pod_name, self.namespace, container=status.name, previous=True,
+                    pod_name, self.namespace, container=status.name, previous=previous,
                     tail_lines=100, limit_bytes=remaining, _request_timeout=2)
                 raw = text.encode('utf-8')[-remaining:]
                 logs[status.name] = raw.decode('utf-8', errors='replace')
@@ -301,10 +321,8 @@ class KubernetesBackend:
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
             pod = self.api.read_namespaced_pod(pod_name, self.namespace, _request_timeout=10)
-            if self._crash_loop_containers(pod):
-                raise RuntimeError(f'Function Pod is in CrashLoopBackOff: {pod_name}')
-            if pod.status.phase in ('Failed', 'Succeeded'):
-                raise RuntimeError(f'Function Pod stopped before package upload: {pod_name}')
+            if self._failed_containers(pod) or pod.status.phase in ('Failed', 'Succeeded'):
+                return
             address = pod.status.pod_ip
             if address:
                 target = f'[{address}]:50051' if ':' in address else f'{address}:50051'
