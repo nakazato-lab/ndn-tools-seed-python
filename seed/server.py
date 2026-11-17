@@ -1,11 +1,16 @@
 import asyncio
 import json
 import logging
+from pathlib import Path
 
 from ndn.encoding import Name
 from segmented_node_wrapper import SegmentedNodeWrapper
+from opentelemetry import trace
+from opentelemetry.context import Context
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 LOG = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 def parse_request(raw):
@@ -24,12 +29,15 @@ def parse_request(raw):
     code_ref = doc.get('code_ref')
     runtime = doc.get('runtime')
     requirements = doc.get('requirements', [])
+    zip_ref = doc.get('zip_content')
+    source_file = doc.get('source')
     if doc['type'] == 'CREATE':
-        if code_ref is not None:
-            if not isinstance(code_ref, str) or not code_ref:
-                raise ValueError('code_ref must be a nonempty name')
-        elif not isinstance(code, str) or not code.strip() or '\x00' in code:
-            raise ValueError('content must be nonempty text without NUL characters')
+        if zip_ref is None:
+            if code_ref is not None:
+                if not isinstance(code_ref, str) or not code_ref:
+                    raise ValueError('code_ref must be a nonempty name')
+            elif not isinstance(code, str) or not code.strip() or '\x00' in code:
+                raise ValueError('content must be nonempty text without NUL characters')
         if runtime not in ('ndn', 'python'):
             raise ValueError("runtime must be 'ndn' or 'python'")
         if not isinstance(requirements, list) or any(
@@ -39,7 +47,13 @@ def parse_request(raw):
             raise ValueError('requirements must be a list of nonempty single-line strings')
         if runtime != 'python' and requirements:
             raise ValueError('requirements are supported only for the python runtime')
-    return doc['type'], name, code, code_ref, runtime, requirements
+        if zip_ref is not None:
+            if not isinstance(zip_ref, str) or not zip_ref.strip():
+                raise ValueError('zip_content must be a nonempty name')
+            if (not isinstance(source_file, str) or not source_file.strip()
+                    or source_file in ('.', '..') or Path(source_file).name != source_file):
+                raise ValueError('source must be a filename when zip_content is provided')
+    return doc['type'], name, code, code_ref, runtime, requirements, zip_ref, source_file
 
 
 
@@ -106,7 +120,8 @@ class SeedServer:
             return
 
         try:
-            operation, prefix, code, code_ref, runtime, requirements = parse_request(app_param)
+            operation, prefix, code, code_ref, runtime, requirements, zip_ref, source_file = parse_request(app_param)
+            parent = TraceContextTextMapPropagator().extract(json.loads(bytes(app_param)), context=Context())
         except Exception as exc:
             LOG.exception('Invalid Seed request')
             self._send_response(name, f'Error: {exc}')
@@ -116,20 +131,41 @@ class SeedServer:
 
         try:
             async with self.lock:
+                with tracer.start_as_current_span(f'seed.{operation.lower()}', context=parent, kind=trace.SpanKind.SERVER,
+                                                 attributes={'ndn.function.name': prefix}):
+                    if operation == 'CREATE':
+                        pod_name, package = await self._create_function(
+                            prefix, code, code_ref, runtime, requirements, zip_ref, source_file)
+                    elif operation == 'DELETE':
+                        await asyncio.to_thread(self.backend.delete, prefix)
+                        self.active.discard(prefix)
                 if operation == 'CREATE':
-                    if code_ref is not None:
-                        try:
-                            code = (await self.fetcher.fetch(
-                                code_ref, must_be_fresh=True)).decode('utf-8')
-                        except UnicodeDecodeError as exc:
-                            raise ValueError('function code must be UTF-8 text') from exc
-                    if not isinstance(code, str) or not code.strip() or '\x00' in code:
-                        raise ValueError('content must be nonempty text without NUL characters')
-                    LOG.info('Received %s function: %s', runtime, prefix)
-                    await asyncio.to_thread(self.backend.create, prefix, code, runtime, requirements)
+                    if pod_name is not None:
+                        await asyncio.to_thread(self.backend.finish_create, prefix, pod_name, package.get('zip_content'))
                     self.active.add(prefix)
-                elif operation == 'DELETE':
-                    await asyncio.to_thread(self.backend.delete, prefix)
-                    self.active.discard(prefix)
         except Exception:
             LOG.exception('Seed %s failed for %s', operation, prefix)
+
+    async def _create_function(self, prefix, code, code_ref, runtime, requirements, zip_ref, source_file):
+        package = {}
+        if zip_ref:
+            with tracer.start_as_current_span('seed.fetch.package', attributes={'ndn.name': zip_ref}):
+                package['zip_content'] = await self.fetcher.fetch(zip_ref, must_be_fresh=True)
+            package['source_file'] = source_file
+            code = None
+        else:
+            code = await self._load_code(code, code_ref)
+        LOG.info('Received %s function: %s', runtime, prefix)
+        pod_name = await asyncio.to_thread(self.backend.create, prefix, code, runtime, requirements, **package)
+        return pod_name, package
+
+    async def _load_code(self, code, code_ref):
+        if code_ref is not None:
+            try:
+                with tracer.start_as_current_span('seed.fetch.code', attributes={'ndn.name': code_ref}):
+                    code = (await self.fetcher.fetch(code_ref, must_be_fresh=True)).decode('utf-8')
+            except UnicodeDecodeError as exc:
+                raise ValueError('function code must be UTF-8 text') from exc
+        if not isinstance(code, str) or not code.strip() or '\x00' in code:
+            raise ValueError('content must be nonempty text without NUL characters')
+        return code
