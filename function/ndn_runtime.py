@@ -19,6 +19,25 @@ class DeployedFunction:
         # Deployment only stores source. ndnc validates it when executed.
         return cls(source)
 
+    async def monitor_memory(self,process,interval=0.05):
+        # あるPIDに対してpsutilによってndnc起動中のメモリ値を0.05sのインターバルで取得し、最高値を返す。
+        peak_rss = 0
+        try:
+            ndnc_process = psutil.Process(process.pid)# psutilがpidを捕まえてprocessオブジェクトを作れるか。
+        except psutil.NoSuchProcess:
+            return peak_rss
+        while process.returncode is None: # ndncが終了しない限り
+            try:
+                rss = ndnc_process.memory_info().rss
+                peak_rss = max(peak_rss, rss)
+            except psutil.NoSuchProcess:
+                break
+
+            await asyncio.sleep(interval)
+
+        return peak_rss
+
+
     async def execute(self, args):
         # Each invocation owns its file, output and process, including during
         # concurrent execution and redeployment.
@@ -32,15 +51,9 @@ class DeployedFunction:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            try:
-                ndnc_process = psutil.Process(process.pid) # process.pidをpsutilで監視する対象にする
-                memory_bytes = ndnc_process.memory_info().rss
-                LOG.info(
-                    'ndnc memory usage: %.2f MiB',
-                    memory_bytes / 1024 / 1024
-                )
-            except psutil.NoSuchProcess:
-                LOG.warning('ndnc process already exited before memory measurement')
+
+            monitor_task = asyncio.create_task(self.monitor_memory(process))  # このタスク(A)実行中でも、ndnc側のタスク（B）を止めない。
+
             try:
                 stdout, stderr = await process.communicate()
             finally:
@@ -59,4 +72,8 @@ class DeployedFunction:
             if stdout:
                 LOG.info('ndnc stdout: %s', stdout.decode('utf-8', errors='replace').rstrip('\n'))
             result = json.loads(result_path.read_text(encoding='utf-8'))
+
+            peak_rss = await monitor_task
+            LOG.info('ndnc peak memory usage: %.2f MiB', peak_rss / 1024 / 1024)
+
             return '' if result is None else str(result)
