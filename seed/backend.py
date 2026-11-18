@@ -235,9 +235,9 @@ class KubernetesBackend:
                     'message': 'Function Pod was replaced or deleted during startup',
                 }
                 return result
-            failed_containers = self._failed_containers(pod)
+            containers_with_execution_failure = self._containers_with_execution_failure(pod)
             # Pending may be normal startup; wait until the deadline.
-            if (not failed_containers
+            if (not containers_with_execution_failure
                     and pod.status.phase == 'Pending' and time.monotonic() < deadline):
                 time.sleep(1)
                 continue
@@ -249,25 +249,25 @@ class KubernetesBackend:
             'name': prefix, 'pod_name': pod.metadata.name, 'node_name': self.node_name,
             'phase': pod.status.phase or 'Unknown',
         }
-        failed_containers = self._failed_containers(pod)
-        if failed_containers:
-            self._collect_container_error_logs(pod.metadata.name, failed_containers, result)
+        containers_with_execution_failure = self._containers_with_execution_failure(pod)
+        if containers_with_execution_failure:
+            self._collect_container_error_logs(pod.metadata.name, containers_with_execution_failure, result)
         elif pod.status.phase == 'Running':
             return result
         else:
             self._collect_events(pod.metadata.uid, result)
         return result
 
-    def _failed_containers(self, pod):
+    def _containers_with_execution_failure(self, pod):
         # fields for pod.status: https://github.com/kubernetes-client/python/blob/master/kubernetes/docs/V1PodStatus.md
         statuses = (pod.status.init_container_statuses or []) + (pod.status.container_statuses or [])
-        failed_containers = []
+        containers_with_execution_failure = []
         for status in statuses:
-            if self._is_container_failed(status):
-                failed_containers.append(status)
-        return failed_containers
+            if self._has_container_execution_failure(status):
+                containers_with_execution_failure.append(status)
+        return containers_with_execution_failure
 
-    def _is_container_failed(self, status):
+    def _has_container_execution_failure(self, status):
         # fields for ContainerStatus: https://github.com/kubernetes-client/python/blob/master/kubernetes/docs/V1ContainerStatus.md
         state = status.state
         if state is None:
@@ -321,7 +321,7 @@ class KubernetesBackend:
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
             pod = self.api.read_namespaced_pod(pod_name, self.namespace, _request_timeout=10)
-            if self._failed_containers(pod) or pod.status.phase in ('Failed', 'Succeeded'):
+            if self._containers_with_execution_failure(pod) or pod.status.phase in ('Failed', 'Succeeded'):
                 return
             address = pod.status.pod_ip
             if address:
