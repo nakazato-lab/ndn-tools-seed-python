@@ -165,7 +165,9 @@ class SeedServer:
                                          attributes={'ndn.function.name': prefix}):
             pod_name, package = await self._create_function(request)
         if pod_name is not None:
-            await asyncio.to_thread(self.backend.finish_create, prefix, pod_name, package.get('zip_content'))
+            await asyncio.to_thread(
+                self.backend.finish_create, prefix, pod_name,
+                code=package['code'], zip_content=package.get('zip_content'))
         self.active.add(prefix)
 
     async def _delete_function(self, prefix, parent):
@@ -202,6 +204,7 @@ class SeedServer:
             code = await self._load_code(request.get('content'), request.get('code_ref'))
         LOG.info('Received %s function: %s', runtime, prefix)
         pod_name = await asyncio.to_thread(self.backend.create, prefix, code, runtime, requirements, **package)
+        package['code'] = code
         return pod_name, package
 
     async def _load_code(self, code, code_ref):

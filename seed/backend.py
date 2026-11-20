@@ -85,6 +85,10 @@ class KubernetesBackend:
             filename = source_file
         code_path = f'/app/code/{filename}'
         runtime_image = self.ndn_function_image if runtime == 'ndn' else self.python_function_image
+        if runtime == 'ndn':
+            runtime_command = 'exec ndnc serve --grpc --port 50051 "$FUNCTION_CODE_PATH"'
+        else:
+            runtime_command = 'exec python3 python_interpreter_server.py 50051 "$FUNCTION_CODE_PATH"'
         name = get_pod_name(prefix, self.node_name)
         metadata = {
             'name': name,
@@ -106,12 +110,10 @@ class KubernetesBackend:
                     'volumeMounts': [{'name': 'nfd-endpoint', 'mountPath': '/etc/ndn-config'}],
                 },
                 {
-                    'name': 'write-function-code',
+                    'name': 'write-function-requirements',
                     'image': runtime_image,
                     'command': ['python3', '-c',
                                 "import json, os; from pathlib import Path; "
-                                f"Path({('/code/' + filename)!r}).write_text(os.environ['FUNCTION_CODE'], encoding='utf-8') "
-                                "if 'FUNCTION_CODE' in os.environ else None; "
                                 "Path('/code/requirements.txt').write_text("
                                 "'\\n'.join(json.loads(os.environ['FUNCTION_REQUIREMENTS'])) + '\\n', encoding='utf-8')"],
                     'env': [
@@ -129,9 +131,8 @@ class KubernetesBackend:
                      'while [ ! -f /etc/ndn-config/ADDRESS ] || '
                      '[ "$(cat /etc/ndn-config/ADDRESS)" = "not available yet" ]; do sleep 2; done; '
                      'export NDN_CLIENT_TRANSPORT="tcp4://$(cat /etc/ndn-config/ADDRESS)"; '
-                     'exec python3 '
-                     f"{'ndn_interpreter_server.py' if runtime == 'ndn' else 'python_interpreter_server.py'} "
-                     '50051 "$FUNCTION_CODE_PATH"',
+                     'while [ ! -f /app/shared/package-ready ]; do sleep 1; done; '
+                     + runtime_command,
                  ],
                  'env': [{'name': 'FUNCTION_CODE_PATH', 'value': code_path.replace('$', '$$')}],
                  'volumeMounts': mounts.copy()},
@@ -153,17 +154,13 @@ class KubernetesBackend:
                 {'name': 'nfd-endpoint', 'emptyDir': {}},
             ],
         }
-        if zip_content is None:
-            spec['initContainers'][1]['env'].append({'name': 'FUNCTION_CODE', 'value': code.replace('$', '$$')})
         for container in spec['containers']:
+            container['env'].append({'name': 'FUNCTION_RUNTIME', 'value': runtime})
             container['env'].append({
                 'name': 'OTEL_EXPORTER_OTLP_ENDPOINT',
                 'value': os.getenv('OTEL_EXPORTER_OTLP_ENDPOINT', 'http://jaeger.jaeger.svc.cluster.local:4318'),
             })
-        if zip_content is not None:
-            function = spec['containers'][0]
-            function['env'].append({'name': 'FUNCTION_PACKAGE_REQUIRED', 'value': '1'})
-            function['volumeMounts'][0] = {'name': 'code', 'mountPath': '/app/code'}
+        spec['containers'][1]['volumeMounts'][0] = {'name': 'code', 'mountPath': '/app/code'}
         if runtime == 'python' and requirements:
             spec['initContainers'].append({
                 'name': 'install-python-dependencies',
@@ -206,10 +203,9 @@ class KubernetesBackend:
             self.api.create_namespaced_pod(self.namespace, manifest, _request_timeout=10)
         return manifest['metadata']['name']
 
-    def finish_create(self, prefix, pod_name, zip_content=None):
+    def finish_create(self, prefix, pod_name, code=None, zip_content=None):
         try:
-            if zip_content is not None:
-                self._upload_package(pod_name, zip_content)
+            self._upload_package(pod_name, code=code, zip_content=zip_content)
         except Exception:
             try:
                 self.api.delete_namespaced_pod(pod_name, self.namespace, _request_timeout=10)
@@ -334,7 +330,11 @@ class KubernetesBackend:
         except Exception as exc:
             result['event_error'] = str(exc)
 
-    def _upload_package(self, pod_name, zip_content):
+    def _upload_package(self, pod_name, code=None, zip_content=None):
+        if zip_content is not None:
+            request = function_pb2.PackageRequest(zip_content=zip_content)
+        else:
+            request = function_pb2.PackageRequest(code=code)
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
             pod = self.api.read_namespaced_pod(pod_name, self.namespace, _request_timeout=10)
@@ -342,11 +342,11 @@ class KubernetesBackend:
                 return
             address = pod.status.pod_ip
             if address:
-                target = f'[{address}]:50051' if ':' in address else f'{address}:50051'
+                target = f'[{address}]:50052' if ':' in address else f'{address}:50052'
                 with grpc.insecure_channel(target) as channel:
-                    stub = function_pb2_grpc.FunctionRuntimeStub(channel)
+                    stub = function_pb2_grpc.FunctionDeploymentStub(channel)
                     stub.UploadPackage(
-                        function_pb2.PackageRequest(zip_content=zip_content),
+                        request,
                         timeout=max(0, deadline - time.monotonic()), wait_for_ready=True)
                 return
             time.sleep(1)

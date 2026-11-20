@@ -12,6 +12,8 @@ from opentelemetry import trace
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 import function_pb2
 import function_pb2_grpc
+from ndnc.grpc import interpreter_pb2, interpreter_pb2_grpc
+from package_server import start_package_server
 from segmented_node_wrapper import SegmentedNodeWrapper
 from ndn_transport import make_app
 from lib.ndn_utils import (
@@ -34,7 +36,11 @@ class NDNFunction:
         self.channel = grpc.insecure_channel(
             f'localhost:{port}', options=[('grpc.max_receive_message_length', -1),
                                          ('grpc.max_send_message_length', -1)])
-        self.stub = function_pb2_grpc.FunctionRuntimeStub(self.channel)
+        self.runtime = os.getenv('FUNCTION_RUNTIME', 'ndn')
+        if self.runtime == 'ndn':
+            self.stub = interpreter_pb2_grpc.InterpreterStub(self.channel)
+        else:
+            self.stub = function_pb2_grpc.FunctionRuntimeStub(self.channel)
 
     async def handle(self, name, param, prefix, app_param=None):
         try:
@@ -90,14 +96,8 @@ class NDNFunction:
                 with tracer.start_as_current_span('sidecar.grpc.execute_func', kind=trace.SpanKind.CLIENT):
                     carrier = {}
                     TraceContextTextMapPropagator().inject(carrier)
-                    response = await asyncio.to_thread(
-                        self.stub.ExecuteFunction, request, timeout=20, metadata=list(carrier.items()))
-                if response.HasField('binary_result'):
-                    content = response.binary_result
-                    reference_key = 'image_ref'
-                else:
-                    content = response.result.encode('utf-8')
-                    reference_key = 'result_ref'
+                    content, reference_key = await asyncio.to_thread(
+                        self.execute_function, request, list(carrier.items()))
                 # The wrapper requires nonempty content; preserve empty execution results.
                 if not content:
                     self.app.put_data(name, content=b'', freshness_period=0)
@@ -112,6 +112,21 @@ class NDNFunction:
             LOG.exception('Function request failed')
             detail = exc.details() if isinstance(exc, grpc.RpcError) else str(exc)
             self.app.put_data(name, content=f'Error: {detail}'.encode(), freshness_period=0)
+
+    def execute_function(self, request, metadata):
+        if self.runtime == 'ndn':
+            if request.HasField('binary_input'):
+                raise ValueError('Binary arguments require the Python runtime')
+            response = self.stub.Execute(
+                interpreter_pb2.ExecutionRequest(args=request.args), timeout=20, metadata=metadata)
+            if response.WhichOneof('value') == 'binary':
+                return response.binary, 'image_ref'
+            return response.text.encode('utf-8'), 'result_ref'
+
+        response = self.stub.ExecuteFunction(request, timeout=20, metadata=metadata)
+        if response.HasField('binary_result'):
+            return response.binary_result, 'image_ref'
+        return response.result.encode('utf-8'), 'result_ref'
 
     async def unregister(self):
         """Remove the function route from NFD before its transport is closed."""
@@ -153,17 +168,23 @@ class NDNFunction:
             task.add_done_callback(self.tasks.discard)
 
         async def started():
+            # Package upload may still be in progress when the Sidecar starts.
+            await asyncio.to_thread(grpc.channel_ready_future(self.channel).result, timeout=120)
             if not await self.app.register(prefix, on_interest):
                 raise RuntimeError(f'NFD rejected function prefix: {prefix}')
             self.registered = True
             LOG.info('Function prefix registered: %s', prefix)
 
+        package_server = None
         try:
+            package_server = await start_package_server(os.environ['FUNCTION_CODE_PATH'])
             await self.app.main_loop(after_start=started())
         finally:
             if self.registered:
                 await self.unregister()
             self.channel.close()
+            if package_server is not None:
+                await package_server.stop(grace=2)
 
     def run(self, prefix):
         asyncio.run(self._run(prefix))

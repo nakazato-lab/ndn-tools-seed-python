@@ -1,60 +1,67 @@
-"""gRPC bridge that directly executes deployed Python scripts."""
+"""Persistent gRPC server that calls a deployed Python execute(input_bytes, args) function."""
 import asyncio
+import contextvars
 import logging
+import importlib.util
 import os
 import signal
-import subprocess
 import sys
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 import grpc
 import function_pb2
 import function_pb2_grpc
-from package_receiver import PackageReceiver
 from opentelemetry import trace
 from tracing import setup_tracing, function_span
 
 LOG = logging.getLogger(__name__)
 
 
-class PythonFunctionServicer(PackageReceiver, function_pb2_grpc.FunctionRuntimeServicer):
-    def __init__(self, code_path, package_required=False):
-        PackageReceiver.__init__(self, code_path, package_required)
-        if not package_required:
-            self.load_source()
+class PythonFunctionServicer(function_pb2_grpc.FunctionRuntimeServicer):
+    def __init__(self, code_path):
+        self.code_path = Path(code_path).resolve()
+        self.function = None
+        # Serialize calls so module state is not modified by concurrent requests.
+        self.executor = ThreadPoolExecutor(max_workers=1)
+        self.load_source()
 
     def load_source(self):
-        LOG.info('Loaded .py source from %s (%d bytes)', self.code_path, self.code_path.stat().st_size)
+        source_dir = str(self.code_path.parent)
+        if source_dir not in sys.path:
+            sys.path.insert(0, source_dir)
+        spec = importlib.util.spec_from_file_location('deployed_function', self.code_path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        if not callable(getattr(module, 'execute', None)):
+            raise ValueError('Python function must define execute(input_bytes, args)')
+        self.function = module.execute
+        LOG.info('Loaded Python function from %s', self.code_path)
+
+    def execute(self, input_bytes, args):
+        with trace.get_tracer(__name__).start_as_current_span('function.python'):
+            return self.function(input_bytes, args)
 
     async def ExecuteFunction(self, request, context):
         with function_span(request, context):
-            if not self.package_ready:
-                await context.abort(grpc.StatusCode.FAILED_PRECONDITION, 'Function package has not been uploaded')
             try:
-                with trace.get_tracer(__name__).start_as_current_span('function.python'):
-                    completed = await asyncio.to_thread(
-                        subprocess.run,
-                        [sys.executable, self.code_path, *request.args],
-                        # Pass the image argument to the Python script through stdin.
-                        input=request.binary_input if request.HasField('binary_input') else None,
-                        capture_output=True,
-                        timeout=20,
-                        check=True,
-                    )
-                if request.HasField('binary_input'):
-                    # Return the processed image written to stdout by the Python script.
-                    return function_pb2.FunctionResponse(binary_result=completed.stdout)
-                try:
-                    result = completed.stdout.decode('utf-8').rstrip('\n')
-                except UnicodeDecodeError:
-                    LOG.info('Executed %s: binary result=%d bytes', request.name, len(completed.stdout))
-                    return function_pb2.FunctionResponse(binary_result=completed.stdout)
-                LOG.info('Executed %s: result=%r', request.name, result)
-                return function_pb2.FunctionResponse(result=result)
-            except subprocess.TimeoutExpired:
+                input_bytes = request.binary_input if request.HasField('binary_input') else None
+                loop = asyncio.get_running_loop()
+                invocation = loop.run_in_executor(
+                    self.executor, contextvars.copy_context().run,
+                    self.execute, input_bytes, list(request.args))
+                remaining = context.time_remaining()
+                # Timing out a response does not stop an already running Python thread.
+                result = await asyncio.wait_for(
+                    invocation, timeout=min(remaining, 20) if remaining is not None else 20)
+                if isinstance(result, bytes):
+                    return function_pb2.FunctionResponse(binary_result=result)
+                if not isinstance(result, str) and result is not None:
+                    raise TypeError('execute() must return bytes, str, or None')
+                return function_pb2.FunctionResponse(result=result or '')
+            except asyncio.TimeoutError:
                 await context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, 'Function execution timed out')
-            except subprocess.CalledProcessError as exc:
-                LOG.exception('Function execution failed')
-                await context.abort(grpc.StatusCode.INVALID_ARGUMENT, exc.stderr.decode('utf-8', errors='replace').strip())
             except Exception as exc:
                 LOG.exception('Function execution failed')
                 await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
@@ -63,8 +70,9 @@ class PythonFunctionServicer(PackageReceiver, function_pb2_grpc.FunctionRuntimeS
 async def serve(port, code_path):
     provider = setup_tracing('function')
     server = grpc.aio.server(options=[('grpc.max_receive_message_length', -1)])
+    runtime = None
     try:
-        runtime = PythonFunctionServicer(code_path, package_required=os.getenv('FUNCTION_PACKAGE_REQUIRED') == '1')
+        runtime = PythonFunctionServicer(code_path)
         function_pb2_grpc.add_FunctionRuntimeServicer_to_server(runtime, server)
         if not server.add_insecure_port(f'0.0.0.0:{port}'):
             raise RuntimeError(f'Cannot bind gRPC port {port}')
@@ -79,6 +87,8 @@ async def serve(port, code_path):
         finally:
             await server.stop(grace=2)
     finally:
+        if runtime is not None:
+            runtime.executor.shutdown(wait=False, cancel_futures=True)
         if provider is not None:
             provider.shutdown()
 
