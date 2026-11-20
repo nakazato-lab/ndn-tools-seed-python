@@ -1,11 +1,16 @@
 """Execute ndn-interpreter in the Function's gRPC server process."""
 import asyncio
+import logging
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event, Thread
 
 from ndnc.interp.evaluator import Interpreter, make_ndn_app
 from ndnc.parser.parser import parse
 from opentelemetry import trace
+import psutil
+
+LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -19,6 +24,27 @@ class DeployedFunction:
         return cls(source, Path(code_path).resolve() if code_path is not None else None)
 
     async def execute(self, args):
+        # Sample on a thread so CPU-bound interpreter work does not block sampling.
+        process = psutil.Process()
+        peak_rss = process.memory_info().rss
+        stopped = Event()
+
+        def monitor_memory():
+            nonlocal peak_rss
+            while not stopped.wait(0.05):
+                peak_rss = max(peak_rss, process.memory_info().rss)
+
+        monitor = Thread(target=monitor_memory)
+        monitor.start()
+        try:
+            return await self._execute(args)
+        finally:
+            stopped.set()
+            monitor.join()
+            peak_rss = max(peak_rss, process.memory_info().rss)
+            LOG.info('Function server sampled peak RSS: %.2f MiB', peak_rss / 1024 / 1024)
+
+    async def _execute(self, args):
         with trace.get_tracer(__name__).start_as_current_span('function.execution'):
             program = parse(self.source)
             interpreter = Interpreter(
