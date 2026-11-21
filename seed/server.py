@@ -2,17 +2,17 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from uuid import uuid4
 
 from ndn.encoding import Name
-from ndn.types import InterestTimeout
 from segmented_node_wrapper import SegmentedNodeWrapper
-from opentelemetry import trace
 from opentelemetry.context import Context
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
+from .deployment import FunctionDeployer
+from .notifier import PlacementResultNotifier
+from .source_loader import FunctionSourceLoader
+
 LOG = logging.getLogger(__name__)
-tracer = trace.get_tracer(__name__)
 
 
 def parse_request(raw):
@@ -69,15 +69,13 @@ async def accept_command(_name, _signature):
 class SeedServer:
     def __init__(self, app, backend, prefix, freshness=0, final=False):
         self.app = app
-        self.backend = backend
         self.prefix = prefix
         self.freshness = freshness
         self.final = final
-        self.fetcher = SegmentedNodeWrapper(app)
-        self.publisher = SegmentedNodeWrapper(app, serve=True)
-        self.active = set()
+        source_loader = FunctionSourceLoader(SegmentedNodeWrapper(app))
+        notifier = PlacementResultNotifier(app, prefix)
+        self.deployer = FunctionDeployer(backend, source_loader, notifier)
         self.tasks = set()
-        self.lock = asyncio.Lock()
         self.registered = False
 
     async def register(self):
@@ -133,87 +131,6 @@ class SeedServer:
         self._send_response(name, 'ACK\n')
 
         try:
-            await self._apply_request(request, parent)
+            await self.deployer.apply(request, parent)
         except Exception:
             LOG.exception('Seed %s failed for %s', request['type'], request['name'])
-
-    async def _apply_request(self, request, parent):
-        if request['type'] == 'CREATE':
-            result = await self._deploy_and_wait(request, parent)
-            registerer_prefix = request.get('registerer_prefix')
-            if registerer_prefix:
-                await self._notify_placement_result(registerer_prefix, result)
-        else:
-            async with self.lock:
-                await self._delete_function(request['name'], parent)
-
-    async def _deploy_and_wait(self, request, parent):
-        try:
-            async with self.lock:
-                await self._deploy_function(request, parent)
-            return await asyncio.to_thread(self.backend.wait_for_placement_result, request['name'])
-        except Exception as exc:
-            LOG.exception('Function deployment failed: %s', request['name'])
-            return {
-                'name': request['name'], 'node_name': self.backend.node_name,
-                'phase': 'Unknown', 'reason': 'DeploymentError', 'message': str(exc),
-            }
-
-    async def _deploy_function(self, request, parent):
-        prefix = request['name']
-        with tracer.start_as_current_span('seed.create', context=parent, kind=trace.SpanKind.SERVER,
-                                         attributes={'ndn.function.name': prefix}):
-            pod_name, package = await self._create_function(request)
-        if pod_name is not None:
-            await asyncio.to_thread(
-                self.backend.finish_create, prefix, pod_name,
-                code=package['code'], zip_content=package.get('zip_content'))
-        self.active.add(prefix)
-
-    async def _delete_function(self, prefix, parent):
-        with tracer.start_as_current_span('seed.delete', context=parent, kind=trace.SpanKind.SERVER,
-                                         attributes={'ndn.function.name': prefix}):
-            await asyncio.to_thread(self.backend.delete, prefix)
-            self.active.discard(prefix)
-
-    async def _notify_placement_result(self, registerer_prefix, result):
-        result_ref = await self.publisher.publish(
-            f'{self.prefix}/results/{uuid4().hex}',
-            json.dumps(result, ensure_ascii=False).encode('utf-8'))
-        LOG.info('Notifying Registerer %s: result_ref=%s', registerer_prefix, result_ref)
-        try:
-            await self.app.express_interest(
-                registerer_prefix, app_param=json.dumps({'result_ref': result_ref}).encode('utf-8'),
-                must_be_fresh=True, can_be_prefix=False, lifetime=1000)
-        except InterestTimeout:
-            # Result notifications are one-way; Registerer does not return a Data ACK.
-            pass
-
-    async def _create_function(self, request):
-        prefix = request['name']
-        runtime = request['runtime']
-        requirements = request.get('requirements', [])
-        zip_ref = request.get('zip_content')
-        package = {}
-        if zip_ref:
-            with tracer.start_as_current_span('seed.fetch.package', attributes={'ndn.name': zip_ref}):
-                package['zip_content'] = await self.fetcher.fetch(zip_ref, must_be_fresh=True)
-            package['source_file'] = request['source']
-            code = None
-        else:
-            code = await self._load_code(request.get('content'), request.get('code_ref'))
-        LOG.info('Received %s function: %s', runtime, prefix)
-        pod_name = await asyncio.to_thread(self.backend.create, prefix, code, runtime, requirements, **package)
-        package['code'] = code
-        return pod_name, package
-
-    async def _load_code(self, code, code_ref):
-        if code_ref is not None:
-            try:
-                with tracer.start_as_current_span('seed.fetch.code', attributes={'ndn.name': code_ref}):
-                    code = (await self.fetcher.fetch(code_ref, must_be_fresh=True)).decode('utf-8')
-            except UnicodeDecodeError as exc:
-                raise ValueError('function code must be UTF-8 text') from exc
-        if not isinstance(code, str) or not code.strip() or '\x00' in code:
-            raise ValueError('content must be nonempty text without NUL characters')
-        return code

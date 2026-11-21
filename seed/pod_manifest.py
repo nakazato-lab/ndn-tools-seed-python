@@ -1,0 +1,136 @@
+"""Build Function Pod manifests without calling the Kubernetes API."""
+import hashlib
+import json
+import os
+import re
+
+
+def get_pod_name(prefix, node_name):
+    # e.g. /average → average
+    slug = re.sub(r'[^a-z0-9-]+', '-', prefix.lower()).strip('-')[:40] or 'function'
+    identity = prefix + "\0" + node_name
+    return f"func-{slug}-{hashlib.sha256(identity.encode()).hexdigest()[:12]}"
+
+
+
+class PodManifestBuilder:
+    def __init__(self, node_name, ndn_function_image, sidecar_image, python_function_image, transport):
+        self.node_name = node_name
+        self.ndn_function_image = ndn_function_image
+        self.sidecar_image = sidecar_image
+        self.python_function_image = python_function_image
+        self.transport = transport
+
+    def build(self, prefix, runtime, requirements=(), source_file=None):
+        if runtime not in ('ndn', 'python'):
+            raise ValueError(f'Unsupported function runtime: {runtime}')
+        filename = 'func.ndn' if runtime == 'ndn' else 'func.py'
+        if source_file is not None:
+            filename = source_file
+        code_path = f'/app/code/{filename}'
+        runtime_image = self.ndn_function_image if runtime == 'ndn' else self.python_function_image
+        if runtime == 'ndn':
+            runtime_command = 'exec ndnc serve --grpc --port 50051 "$FUNCTION_CODE_PATH"'
+        else:
+            runtime_command = 'exec python3 python_interpreter_server.py 50051 "$FUNCTION_CODE_PATH"'
+        name = get_pod_name(prefix, self.node_name)
+        metadata = {
+            'name': name,
+            'labels': {'app': 'edge-function', 'managed-by': 'ndn-seed-python'},
+            'annotations': {'ndn-prefix': prefix},
+        }
+        mounts = [{'name': 'code', 'mountPath': '/app/code', 'readOnly': True},
+                  {'name': 'shared', 'mountPath': '/app/shared'},
+                  {'name': 'nfd-endpoint', 'mountPath': '/etc/ndn-config'}]
+        spec = {
+            'restartPolicy': 'Never',
+            'initContainers': [
+                {
+                    'name': 'nfd-address',
+                    'image': 'ghcr.io/nakazato-lab/ndn-dhcp/ndn-dhcp-client:latest',
+                    'imagePullPolicy': 'Always',
+                    'env': [{'name': 'NODE_NAME', 'valueFrom': {
+                        'fieldRef': {'fieldPath': 'spec.nodeName'}}}],
+                    'volumeMounts': [{'name': 'nfd-endpoint', 'mountPath': '/etc/ndn-config'}],
+                },
+                {
+                    'name': 'write-function-requirements',
+                    'image': runtime_image,
+                    'command': ['python3', '-c',
+                                "import json, os; from pathlib import Path; "
+                                "Path('/code/requirements.txt').write_text("
+                                "'\\n'.join(json.loads(os.environ['FUNCTION_REQUIREMENTS'])) + '\\n', encoding='utf-8')"],
+                    'env': [
+                        {'name': 'FUNCTION_REQUIREMENTS', 'value': json.dumps(list(requirements))},
+                    ],
+                    'volumeMounts': [{'name': 'code', 'mountPath': '/code'}],
+                },
+            ],
+            'containers': [
+                {'name': 'function', 'image': runtime_image,
+                 # Resolve the NFD selected for this Pod by its DHCP init
+                 # container instead of inheriting the Seed Pod's transport.
+                 'command': ['/bin/sh', '-ec'],
+                 'args': [
+                     'while [ ! -f /etc/ndn-config/ADDRESS ] || '
+                     '[ "$(cat /etc/ndn-config/ADDRESS)" = "not available yet" ]; do sleep 2; done; '
+                     'export NDN_CLIENT_TRANSPORT="tcp4://$(cat /etc/ndn-config/ADDRESS)"; '
+                     'while [ ! -f /app/shared/package-ready ]; do sleep 1; done; '
+                     + runtime_command,
+                 ],
+                 'env': [{'name': 'FUNCTION_CODE_PATH', 'value': code_path.replace('$', '$$')}],
+                 'volumeMounts': mounts.copy()},
+                {'name': 'sidecar', 'image': self.sidecar_image,
+                 'command': ['/bin/bash', '-ec'],
+                 'args': [
+                     'while [ ! -f /etc/ndn-config/ADDRESS ] || '
+                     '[ "$(cat /etc/ndn-config/ADDRESS)" = "not available yet" ]; do sleep 2; done; '
+                     'export NDN_CLIENT_TRANSPORT="tcp4://$(cat /etc/ndn-config/ADDRESS)"; '
+                     'exec python3 main.py "$1"',
+                     'seed-sidecar', prefix,
+                 ],
+                 'env': [{'name': 'FUNCTION_CODE_PATH', 'value': code_path.replace('$', '$$')}],
+                 'volumeMounts': mounts.copy()},
+            ],
+            'volumes': [
+                {'name': 'code', 'emptyDir': {}},
+                {'name': 'shared', 'emptyDir': {}},
+                {'name': 'nfd-endpoint', 'emptyDir': {}},
+            ],
+        }
+        for container in spec['containers']:
+            container['env'].append({'name': 'FUNCTION_RUNTIME', 'value': runtime})
+            container['env'].append({
+                'name': 'OTEL_EXPORTER_OTLP_ENDPOINT',
+                'value': os.getenv('OTEL_EXPORTER_OTLP_ENDPOINT', 'http://jaeger.jaeger.svc.cluster.local:4318'),
+            })
+        spec['containers'][1]['volumeMounts'][0] = {'name': 'code', 'mountPath': '/app/code'}
+        if runtime == 'python' and requirements:
+            spec['initContainers'].append({
+                'name': 'install-python-dependencies',
+                'image': runtime_image,
+                'command': ['/bin/sh', '-ec'],
+                'args': [
+                    'python3 -m pip install --no-cache-dir --target /code/site-packages '
+                    '-r /code/requirements.txt',
+                ],
+                'volumeMounts': [
+                    {'name': 'code', 'mountPath': '/code'},
+                ],
+            })
+            spec['containers'][0]['env'].append({
+                'name': 'PYTHONPATH', 'value': '/app/code/site-packages',
+            })
+        if self.transport.startswith('unix://'):
+            spec['volumes'].append({
+                'name': 'nfd', 'hostPath': {'path': '/var/run/nfd-k8s', 'type': 'Directory'},
+            })
+            for container in spec['containers']:
+                container['volumeMounts'].append({'name': 'nfd', 'mountPath': '/run'})
+        spec['nodeName'] = self.node_name
+        return {
+            'apiVersion': 'v1',
+            'kind': 'Pod',
+            'metadata': metadata,
+            'spec': spec,
+        }
