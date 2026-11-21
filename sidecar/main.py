@@ -2,7 +2,7 @@
 import logging
 import sys
 
-from server import Sidecar
+from server import SidecarServer
 from tracing import setup_tracing
 
 
@@ -14,7 +14,7 @@ def main():
     print("Starting NDN gRPC Server...")
     provider = setup_tracing('sidecar')
     try:
-        sidecar = Sidecar()
+        sidecar = SidecarServer()
         sidecar.run(sys.argv[1])
     finally:
         if provider is not None:

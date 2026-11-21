@@ -60,10 +60,10 @@ class PythonFunctionServicer(function_pb2_grpc.FunctionRuntimeServicer):
                 result = await asyncio.wait_for(
                     invocation, timeout=min(remaining, 20) if remaining is not None else 20)
                 if isinstance(result, bytes):
-                    return function_pb2.FunctionResponse(binary_result=result)
+                    return function_pb2.ExecutionResult(binary_result=result)
                 if not isinstance(result, str) and result is not None:
                     raise TypeError('execute() must return bytes, str, or None')
-                return function_pb2.FunctionResponse(result=result or '')
+                return function_pb2.ExecutionResult(result=result or '')
             except asyncio.TimeoutError:
                 await context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, 'Function execution timed out')
             except Exception as exc:

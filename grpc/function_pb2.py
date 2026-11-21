@@ -24,17 +24,17 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0e\x66unction.proto\x12\x08\x66unction\"Y\n\x0f\x46unctionRequest\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x0c\n\x04\x61rgs\x18\x02 \x03(\t\x12\x19\n\x0c\x62inary_input\x18\x03 \x01(\x0cH\x00\x88\x01\x01\x42\x0f\n\r_binary_input\"P\n\x10\x46unctionResponse\x12\x0e\n\x06result\x18\x01 \x01(\t\x12\x1a\n\rbinary_result\x18\x02 \x01(\x0cH\x00\x88\x01\x01\x42\x10\n\x0e_binary_result\"B\n\x0ePackageRequest\x12\x15\n\x0bzip_content\x18\x01 \x01(\x0cH\x00\x12\x0e\n\x04\x63ode\x18\x02 \x01(\tH\x00\x42\t\n\x07\x63ontent\"\x11\n\x0fPackageResponse2S\n\x0f\x46unctionRuntime\x12@\n\x07\x45xecute\x12\x19.function.FunctionRequest\x1a\x1a.function.FunctionResponse2Z\n\x12\x46unctionDeployment\x12\x44\n\rUploadPackage\x12\x18.function.PackageRequest\x1a\x19.function.PackageResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0e\x66unction.proto\x12\x08\x66unction\"Z\n\x10\x45xecutionRequest\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x0c\n\x04\x61rgs\x18\x02 \x03(\t\x12\x19\n\x0c\x62inary_input\x18\x03 \x01(\x0cH\x00\x88\x01\x01\x42\x0f\n\r_binary_input\"O\n\x0f\x45xecutionResult\x12\x0e\n\x06result\x18\x01 \x01(\t\x12\x1a\n\rbinary_result\x18\x02 \x01(\x0cH\x00\x88\x01\x01\x42\x10\n\x0e_binary_result\"B\n\x0ePackageRequest\x12\x15\n\x0bzip_content\x18\x01 \x01(\x0cH\x00\x12\x0e\n\x04\x63ode\x18\x02 \x01(\tH\x00\x42\t\n\x07\x63ontent\"\x11\n\x0fPackageResponse2S\n\x0f\x46unctionRuntime\x12@\n\x07\x45xecute\x12\x1a.function.ExecutionRequest\x1a\x19.function.ExecutionResult2Z\n\x12\x46unctionDeployment\x12\x44\n\rUploadPackage\x12\x18.function.PackageRequest\x1a\x19.function.PackageResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'function_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_FUNCTIONREQUEST']._serialized_start=28
-  _globals['_FUNCTIONREQUEST']._serialized_end=117
-  _globals['_FUNCTIONRESPONSE']._serialized_start=119
-  _globals['_FUNCTIONRESPONSE']._serialized_end=199
+  _globals['_EXECUTIONREQUEST']._serialized_start=28
+  _globals['_EXECUTIONREQUEST']._serialized_end=118
+  _globals['_EXECUTIONRESULT']._serialized_start=120
+  _globals['_EXECUTIONRESULT']._serialized_end=199
   _globals['_PACKAGEREQUEST']._serialized_start=201
   _globals['_PACKAGEREQUEST']._serialized_end=267
   _globals['_PACKAGERESPONSE']._serialized_start=269

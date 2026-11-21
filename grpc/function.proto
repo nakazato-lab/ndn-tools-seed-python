@@ -3,20 +3,20 @@ syntax = "proto3";
 package function;
 
 service FunctionRuntime {
-  rpc Execute (FunctionRequest) returns (FunctionResponse);
+  rpc Execute (ExecutionRequest) returns (ExecutionResult);
 }
 
 service FunctionDeployment {
   rpc UploadPackage (PackageRequest) returns (PackageResponse);
 }
 
-message FunctionRequest {
+message ExecutionRequest {
   string name = 1;
   repeated string args = 2;
   optional bytes binary_input = 3;
 }
 
-message FunctionResponse {
+message ExecutionResult {
   string result = 1;
   optional bytes binary_result = 2;
 }

@@ -12,7 +12,7 @@ from runtime_client import FunctionRuntimeClient
 LOG = logging.getLogger(__name__)
 
 
-class Sidecar:
+class SidecarServer:
     def __init__(self):
         self.app = make_app()
         self.tasks = set()

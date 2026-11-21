@@ -8,8 +8,8 @@ class FunctionRuntimeStub:
     def __init__(self, channel):
         self.Execute = channel.unary_unary(
             '/function.FunctionRuntime/Execute',
-            request_serializer=function__pb2.FunctionRequest.SerializeToString,
-            response_deserializer=function__pb2.FunctionResponse.FromString,
+            request_serializer=function__pb2.ExecutionRequest.SerializeToString,
+            response_deserializer=function__pb2.ExecutionResult.FromString,
             _registered_method=True)
 
 
@@ -24,8 +24,8 @@ def add_FunctionRuntimeServicer_to_server(servicer, server):
     rpc_method_handlers = {
         'Execute': grpc.unary_unary_rpc_method_handler(
             servicer.Execute,
-            request_deserializer=function__pb2.FunctionRequest.FromString,
-            response_serializer=function__pb2.FunctionResponse.SerializeToString),
+            request_deserializer=function__pb2.ExecutionRequest.FromString,
+            response_serializer=function__pb2.ExecutionResult.SerializeToString),
     }
     generic_handler = grpc.method_handlers_generic_handler(
         'function.FunctionRuntime', rpc_method_handlers)

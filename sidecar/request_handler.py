@@ -69,7 +69,7 @@ class FunctionRequestHandler:
         image_ref = parameters.get('image_ref')
         if image_ref in args:
             args.remove(image_ref)
-        request = function_pb2.FunctionRequest(name=extract_function_name(original), args=args)
+        request = function_pb2.ExecutionRequest(name=extract_function_name(original), args=args)
         if interest_args:
             request.binary_input = await self.fetch_interest_image(interest_args[0])
         elif image_ref:
