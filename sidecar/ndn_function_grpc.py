@@ -123,7 +123,7 @@ class NDNFunction:
                 return response.binary, 'image_ref'
             return response.text.encode('utf-8'), 'result_ref'
 
-        response = self.stub.ExecuteFunction(request, timeout=20, metadata=metadata)
+        response = self.stub.Execute(request, timeout=20, metadata=metadata)
         if response.HasField('binary_result'):
             return response.binary_result, 'image_ref'
         return response.result.encode('utf-8'), 'result_ref'

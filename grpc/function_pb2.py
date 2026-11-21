@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0e\x66unction.proto\x12\x08\x66unction\"Y\n\x0f\x46unctionRequest\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x0c\n\x04\x61rgs\x18\x02 \x03(\t\x12\x19\n\x0c\x62inary_input\x18\x03 \x01(\x0cH\x00\x88\x01\x01\x42\x0f\n\r_binary_input\"P\n\x10\x46unctionResponse\x12\x0e\n\x06result\x18\x01 \x01(\t\x12\x1a\n\rbinary_result\x18\x02 \x01(\x0cH\x00\x88\x01\x01\x42\x10\n\x0e_binary_result\"B\n\x0ePackageRequest\x12\x15\n\x0bzip_content\x18\x01 \x01(\x0cH\x00\x12\x0e\n\x04\x63ode\x18\x02 \x01(\tH\x00\x42\t\n\x07\x63ontent\"\x11\n\x0fPackageResponse2[\n\x0f\x46unctionRuntime\x12H\n\x0f\x45xecuteFunction\x12\x19.function.FunctionRequest\x1a\x1a.function.FunctionResponse2Z\n\x12\x46unctionDeployment\x12\x44\n\rUploadPackage\x12\x18.function.PackageRequest\x1a\x19.function.PackageResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0e\x66unction.proto\x12\x08\x66unction\"Y\n\x0f\x46unctionRequest\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x0c\n\x04\x61rgs\x18\x02 \x03(\t\x12\x19\n\x0c\x62inary_input\x18\x03 \x01(\x0cH\x00\x88\x01\x01\x42\x0f\n\r_binary_input\"P\n\x10\x46unctionResponse\x12\x0e\n\x06result\x18\x01 \x01(\t\x12\x1a\n\rbinary_result\x18\x02 \x01(\x0cH\x00\x88\x01\x01\x42\x10\n\x0e_binary_result\"B\n\x0ePackageRequest\x12\x15\n\x0bzip_content\x18\x01 \x01(\x0cH\x00\x12\x0e\n\x04\x63ode\x18\x02 \x01(\tH\x00\x42\t\n\x07\x63ontent\"\x11\n\x0fPackageResponse2S\n\x0f\x46unctionRuntime\x12@\n\x07\x45xecute\x12\x19.function.FunctionRequest\x1a\x1a.function.FunctionResponse2Z\n\x12\x46unctionDeployment\x12\x44\n\rUploadPackage\x12\x18.function.PackageRequest\x1a\x19.function.PackageResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -40,7 +40,7 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_PACKAGERESPONSE']._serialized_start=269
   _globals['_PACKAGERESPONSE']._serialized_end=286
   _globals['_FUNCTIONRUNTIME']._serialized_start=288
-  _globals['_FUNCTIONRUNTIME']._serialized_end=379
-  _globals['_FUNCTIONDEPLOYMENT']._serialized_start=381
-  _globals['_FUNCTIONDEPLOYMENT']._serialized_end=471
+  _globals['_FUNCTIONRUNTIME']._serialized_end=371
+  _globals['_FUNCTIONDEPLOYMENT']._serialized_start=373
+  _globals['_FUNCTIONDEPLOYMENT']._serialized_end=463
 # @@protoc_insertion_point(module_scope)

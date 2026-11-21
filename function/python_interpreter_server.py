@@ -43,7 +43,7 @@ class PythonFunctionServicer(function_pb2_grpc.FunctionRuntimeServicer):
         with trace.get_tracer(__name__).start_as_current_span('function.python'):
             return self.function(input_bytes, args)
 
-    async def ExecuteFunction(self, request, context):
+    async def Execute(self, request, context):
         with function_span(request, context):
             try:
                 input_bytes = request.binary_input if request.HasField('binary_input') else None
