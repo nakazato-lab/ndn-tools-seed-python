@@ -1,21 +1,26 @@
-import sys
+"""Start the Function Sidecar."""
 import logging
+import sys
 
-logging.basicConfig(level=logging.INFO)
-from ndn_function_grpc import NDNFunction
+from server import SidecarServer
 from tracing import setup_tracing
 
-if __name__ == '__main__':
+
+def main():
+    logging.basicConfig(level=logging.INFO)
     if len(sys.argv) < 2:
         print("Usage: python main.py <prefix>")
-        sys.exit(1)
-        
+        return 1
     print("Starting NDN gRPC Server...")
-    prefix = sys.argv[1]
     provider = setup_tracing('sidecar')
     try:
-        ndn = NDNFunction()
-        ndn.run(prefix)
+        sidecar = SidecarServer()
+        sidecar.run(sys.argv[1])
     finally:
         if provider is not None:
             provider.shutdown()
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

@@ -1,11 +1,8 @@
 FROM python:3.12-slim
 WORKDIR /app
-COPY tracing.py ./
 ENV PYTHONUNBUFFERED=1
 
 COPY function/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY grpc/function_pb2.py grpc/function_pb2_grpc.py ./
-COPY function/ndn_interpreter_server.py function/ndn_runtime.py function/package_receiver.py ./
 
-CMD ["python3", "ndn_interpreter_server.py", "50051"]
+CMD ["/bin/sh", "-ec", "exec ndnc serve --grpc --port 50051 \"${FUNCTION_CODE_PATH:-/app/func.ndn}\""]
