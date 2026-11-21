@@ -1,13 +1,11 @@
 """Persistent gRPC server that calls a deployed Python execute(input_bytes, args) function."""
 import asyncio
-import contextvars
 import logging
 import importlib.util
 import os
 import signal
 import sys
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
 
 import grpc
 import function_pb2
@@ -22,8 +20,6 @@ class PythonFunctionServicer(function_pb2_grpc.FunctionRuntimeServicer):
     def __init__(self, code_path):
         self.code_path = Path(code_path).resolve()
         self.function = None
-        # Serialize calls so module state is not modified by concurrent requests.
-        self.executor = ThreadPoolExecutor(max_workers=1)
 
     def load_source(self):
         source_dir = str(self.code_path.parent)
@@ -51,21 +47,12 @@ class PythonFunctionServicer(function_pb2_grpc.FunctionRuntimeServicer):
                 await context.abort(grpc.StatusCode.FAILED_PRECONDITION, 'Function source has not been deployed')
             try:
                 input_bytes = request.binary_input if request.HasField('binary_input') else None
-                loop = asyncio.get_running_loop()
-                invocation = loop.run_in_executor(
-                    self.executor, contextvars.copy_context().run,
-                    self.execute, input_bytes, list(request.args))
-                remaining = context.time_remaining()
-                # Timing out a response does not stop an already running Python thread.
-                result = await asyncio.wait_for(
-                    invocation, timeout=min(remaining, 20) if remaining is not None else 20)
+                result = self.execute(input_bytes, list(request.args))
                 if isinstance(result, bytes):
                     return function_pb2.ExecutionResult(binary_result=result)
                 if not isinstance(result, str) and result is not None:
                     raise TypeError('execute() must return bytes, str, or None')
                 return function_pb2.ExecutionResult(result=result or '')
-            except asyncio.TimeoutError:
-                await context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, 'Function execution timed out')
             except Exception as exc:
                 LOG.exception('Function execution failed')
                 await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
@@ -74,7 +61,6 @@ class PythonFunctionServicer(function_pb2_grpc.FunctionRuntimeServicer):
 async def serve(port, code_path):
     provider = setup_tracing('function')
     server = grpc.aio.server(options=[('grpc.max_receive_message_length', -1)])
-    runtime = None
     try:
         runtime = PythonFunctionServicer(code_path)
         function_pb2_grpc.add_FunctionRuntimeServicer_to_server(runtime, server)
@@ -91,8 +77,6 @@ async def serve(port, code_path):
         finally:
             await server.stop(grace=2)
     finally:
-        if runtime is not None:
-            runtime.executor.shutdown(wait=False, cancel_futures=True)
         if provider is not None:
             provider.shutdown()
 
