@@ -83,7 +83,7 @@ class KubernetesBackend:
             self.api.create_namespaced_pod(self.namespace, manifest, _request_timeout=10)
         return manifest['metadata']['name']
 
-    def finish_create(self, prefix, pod_name, code=None, zip_content=None):
+    def upload_function(self, prefix, pod_name, code=None, zip_content=None):
         try:
             self._upload_package(pod_name, code=code, zip_content=zip_content)
         except Exception:

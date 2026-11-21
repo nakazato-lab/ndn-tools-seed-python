@@ -27,7 +27,7 @@ class PodManifestBuilder:
         filename = 'func.ndn' if runtime == 'ndn' else 'func.py'
         if source_file is not None:
             filename = source_file
-        code_path = f'/app/code/{filename}'
+        code_path = f'/app/code/function/{filename}'
         runtime_image = self.ndn_function_image if runtime == 'ndn' else self.python_function_image
         if runtime == 'ndn':
             runtime_command = 'exec ndnc serve --grpc --port 50051 "$FUNCTION_CODE_PATH"'
@@ -40,7 +40,6 @@ class PodManifestBuilder:
             'annotations': {'ndn-prefix': prefix},
         }
         mounts = [{'name': 'code', 'mountPath': '/app/code', 'readOnly': True},
-                  {'name': 'shared', 'mountPath': '/app/shared'},
                   {'name': 'nfd-endpoint', 'mountPath': '/etc/ndn-config'}]
         spec = {
             'restartPolicy': 'Never',
@@ -75,7 +74,6 @@ class PodManifestBuilder:
                      'while [ ! -f /etc/ndn-config/ADDRESS ] || '
                      '[ "$(cat /etc/ndn-config/ADDRESS)" = "not available yet" ]; do sleep 2; done; '
                      'export NDN_CLIENT_TRANSPORT="tcp4://$(cat /etc/ndn-config/ADDRESS)"; '
-                     'while [ ! -f /app/shared/package-ready ]; do sleep 1; done; '
                      + runtime_command,
                  ],
                  'env': [{'name': 'FUNCTION_CODE_PATH', 'value': code_path.replace('$', '$$')}],
@@ -94,7 +92,6 @@ class PodManifestBuilder:
             ],
             'volumes': [
                 {'name': 'code', 'emptyDir': {}},
-                {'name': 'shared', 'emptyDir': {}},
                 {'name': 'nfd-endpoint', 'emptyDir': {}},
             ],
         }

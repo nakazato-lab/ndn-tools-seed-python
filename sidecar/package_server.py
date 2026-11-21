@@ -2,6 +2,7 @@
 import asyncio
 import io
 from pathlib import Path
+import tempfile
 import zipfile
 
 import grpc
@@ -10,9 +11,8 @@ import function_pb2_grpc
 
 
 class SidecarPackageReceiver(function_pb2_grpc.FunctionDeploymentServicer):
-    def __init__(self, code_path, ready_path='/app/shared/package-ready'):
+    def __init__(self, code_path):
         self.code_path = Path(code_path).resolve()
-        self.ready_path = Path(ready_path)
 
     async def UploadPackage(self, request, context):
         try:
@@ -22,19 +22,23 @@ class SidecarPackageReceiver(function_pb2_grpc.FunctionDeploymentServicer):
         return function_pb2.PackageResponse()
 
     def write_package(self, request):
-        self.code_path.parent.mkdir(parents=True, exist_ok=True)
-        content = request.WhichOneof('content')
-        if content == 'zip_content':
-            with zipfile.ZipFile(io.BytesIO(request.zip_content)) as archive:
-                archive.extractall(self.code_path.parent)
-        elif content == 'code':
-            self.code_path.write_text(request.code, encoding='utf-8')
-        else:
-            raise ValueError('Function code or ZIP is required')
-        if not self.code_path.is_file():
-            raise ValueError(f'Function source not found in package: {self.code_path.name}')
-        # Both runtimes start only after all function files have been written.
-        self.ready_path.touch()
+        destination = self.code_path.parent
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        # Prevent the Function from reading files while they are being written.
+        with tempfile.TemporaryDirectory(prefix='.function-', dir=destination.parent) as temporary:
+            directory = Path(temporary)
+            content = request.WhichOneof('content')
+            if content == 'zip_content':
+                with zipfile.ZipFile(io.BytesIO(request.zip_content)) as archive:
+                    archive.extractall(directory)
+            elif content == 'code':
+                (directory / self.code_path.name).write_text(request.code, encoding='utf-8')
+            else:
+                raise ValueError('Function code or ZIP is required')
+            if not (directory / self.code_path.name).is_file():
+                raise ValueError(f'Function source not found in package: {self.code_path.name}')
+            # Publish the source and all attachments together after writing finishes.
+            directory.rename(destination)
 
 
 async def start_package_server(code_path):

@@ -51,7 +51,7 @@ class FunctionDeployer:
                 zip_content=source.get('zip_content'), source_file=source.get('source_file'))
         if pod_name is not None:
             await asyncio.to_thread(
-                self.backend.finish_create, prefix, pod_name,
+                self.backend.upload_function, prefix, pod_name,
                 code=source['code'], zip_content=source.get('zip_content'))
         self.active.add(prefix)
 

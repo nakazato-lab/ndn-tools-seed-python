@@ -24,7 +24,6 @@ class PythonFunctionServicer(function_pb2_grpc.FunctionRuntimeServicer):
         self.function = None
         # Serialize calls so module state is not modified by concurrent requests.
         self.executor = ThreadPoolExecutor(max_workers=1)
-        self.load_source()
 
     def load_source(self):
         source_dir = str(self.code_path.parent)
@@ -41,10 +40,15 @@ class PythonFunctionServicer(function_pb2_grpc.FunctionRuntimeServicer):
 
     def execute(self, input_bytes, args):
         with trace.get_tracer(__name__).start_as_current_span('function.python'):
+            if self.function is None:
+                self.load_source()
             return self.function(input_bytes, args)
 
     async def Execute(self, request, context):
         with function_span(request, context):
+            # Check whether a regular file exists at this path.
+            if self.function is None and not self.code_path.is_file():
+                await context.abort(grpc.StatusCode.FAILED_PRECONDITION, 'Function source has not been deployed')
             try:
                 input_bytes = request.binary_input if request.HasField('binary_input') else None
                 loop = asyncio.get_running_loop()

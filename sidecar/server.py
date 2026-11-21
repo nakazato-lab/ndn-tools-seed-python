@@ -29,7 +29,7 @@ class Sidecar:
         task.add_done_callback(self.tasks.discard)
 
     async def register(self):
-        # Function startup waits for the Sidecar to finish writing its code or ZIP.
+        # Register the NDN route once the runtime accepts gRPC requests.
         await self.runtime_client.wait_until_ready()
         if not await self.app.register(self.prefix, self.on_interest):
             raise RuntimeError(f'NFD rejected function prefix: {self.prefix}')
