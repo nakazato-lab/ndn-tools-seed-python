@@ -8,6 +8,11 @@ import zipfile
 import grpc
 import function_pb2
 import function_pb2_grpc
+from opentelemetry import trace
+from opentelemetry.context import Context
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+tracer = trace.get_tracer(__name__)
 
 
 class SidecarPackageReceiver(function_pb2_grpc.FunctionDeploymentServicer):
@@ -15,11 +20,13 @@ class SidecarPackageReceiver(function_pb2_grpc.FunctionDeploymentServicer):
         self.code_path = Path(code_path).resolve()
 
     async def UploadPackage(self, request, context):
+        parent = TraceContextTextMapPropagator().extract(dict(context.invocation_metadata()), context=Context())
         try:
-            await asyncio.to_thread(self.write_package, request)
+            with tracer.start_as_current_span('sidecar.receive.package', context=parent, kind=trace.SpanKind.SERVER):
+                await asyncio.to_thread(self.write_package, request)
+                return function_pb2.PackageResponse()
         except (ValueError, OSError, zipfile.BadZipFile) as exc:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
-        return function_pb2.PackageResponse()
 
     def write_package(self, request):
         destination = self.code_path.parent

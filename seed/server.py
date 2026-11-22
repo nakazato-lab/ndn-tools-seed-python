@@ -1,10 +1,12 @@
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
 
 from ndn.encoding import Name
 from segmented_node_wrapper import SegmentedNodeWrapper
+from opentelemetry import trace
 from opentelemetry.context import Context
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
@@ -13,6 +15,7 @@ from .notifier import PlacementResultNotifier
 from .source_loader import FunctionSourceLoader
 
 LOG = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 def parse_request(raw):
@@ -106,7 +109,10 @@ class SeedServer:
         # Echo the entire received Name, including the parameters digest.
         try:
             self.app.put_data(name, content=content.encode(), **options)
-        except Exception:
+        except Exception as exc:
+            span = trace.get_current_span()
+            span.record_exception(exc)
+            span.set_status(trace.StatusCode.ERROR, str(exc))
             LOG.exception('Could not send Seed response')
 
     def on_interest(self, name, _param, app_param):
@@ -115,22 +121,41 @@ class SeedServer:
         task.add_done_callback(self.tasks.discard)
 
     async def handle(self, name, app_param):
-        if app_param is None:
-            LOG.error('Seed request is missing ApplicationParameters: %s', Name.to_str(name))
+        received_at = time.time_ns()
+        parent = Context()
+        # Extract propagation fields before validation so rejected requests keep their trace.
+        if app_param is not None:
+            try:
+                carrier = json.loads(bytes(app_param))
+                if isinstance(carrier, dict):
+                    parent = TraceContextTextMapPropagator().extract(carrier, context=Context())
+            except (ValueError, TypeError):
+                pass
+
+        with tracer.start_as_current_span(
+                'seed.operation', context=parent, kind=trace.SpanKind.SERVER,
+                start_time=received_at, attributes={'ndn.name': Name.to_str(name)}) as span:
+            if app_param is None:
+                span.set_status(trace.StatusCode.ERROR, 'Missing ApplicationParameters')
+                LOG.error('Seed request is missing ApplicationParameters: %s', Name.to_str(name))
+                self._send_response(name, 'ACK\n')
+                return
+
+            try:
+                request = parse_request(app_param)
+            except Exception as exc:
+                span.record_exception(exc)
+                span.set_status(trace.StatusCode.ERROR, str(exc))
+                LOG.exception('Invalid Seed request')
+                self._send_response(name, f'Error: {exc}')
+                return
+
+            span.set_attribute('ndn.function.name', request['name'])
+            span.set_attribute('seed.operation', request['type'])
             self._send_response(name, 'ACK\n')
-            return
-
-        try:
-            request = parse_request(app_param)
-            parent = TraceContextTextMapPropagator().extract(request, context=Context())
-        except Exception as exc:
-            LOG.exception('Invalid Seed request')
-            self._send_response(name, f'Error: {exc}')
-            return
-
-        self._send_response(name, 'ACK\n')
-
-        try:
-            await self.deployer.apply(request, parent)
-        except Exception:
-            LOG.exception('Seed %s failed for %s', request['type'], request['name'])
+            try:
+                await self.deployer.apply(request)
+            except Exception as exc:
+                span.record_exception(exc)
+                span.set_status(trace.StatusCode.ERROR, str(exc))
+                LOG.exception('Seed %s failed for %s', request['type'], request['name'])
