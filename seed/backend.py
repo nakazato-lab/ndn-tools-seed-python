@@ -9,6 +9,7 @@ import function_pb2_grpc
 from kubernetes import client, config
 from kubernetes.client.exceptions import ApiException
 from opentelemetry import trace
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 from .pod_manifest import PodManifestBuilder
 from .pod_monitor import FunctionPodMonitor
@@ -83,7 +84,10 @@ class KubernetesBackend:
             self.api.create_namespaced_pod(self.namespace, manifest, _request_timeout=10)
         return manifest['metadata']['name']
 
+    @tracer.start_as_current_span('seed.upload')
     def upload_function(self, prefix, pod_name, code=None, zip_content=None):
+        trace.get_current_span().set_attribute('ndn.function.name', prefix)
+        trace.get_current_span().set_attribute('k8s.pod.name', pod_name)
         try:
             self._upload_package(pod_name, code=code, zip_content=zip_content)
         except Exception:
@@ -123,9 +127,13 @@ class KubernetesBackend:
                 target = f'[{address}]:50052' if ':' in address else f'{address}:50052'
                 with grpc.insecure_channel(target) as channel:
                     stub = function_pb2_grpc.FunctionDeploymentStub(channel)
-                    stub.UploadPackage(
-                        request,
-                        timeout=max(0, deadline - time.monotonic()), wait_for_ready=True)
+                    with tracer.start_as_current_span('seed.upload.package', kind=trace.SpanKind.CLIENT,
+                                                     attributes={'k8s.pod.name': pod_name}):
+                        carrier = {}
+                        TraceContextTextMapPropagator().inject(carrier)
+                        stub.UploadPackage(
+                            request, metadata=list(carrier.items()),
+                            timeout=max(0, deadline - time.monotonic()), wait_for_ready=True)
                 return
             time.sleep(1)
         raise TimeoutError(f'Timed out waiting for function Pod: {pod_name}')

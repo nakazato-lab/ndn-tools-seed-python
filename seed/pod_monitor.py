@@ -1,6 +1,10 @@
 """Monitor Function startup and collect container logs or Pod events."""
 import time
 
+from opentelemetry import trace
+
+tracer = trace.get_tracer(__name__)
+
 MAX_LOG_BYTES = 64 * 1024
 
 
@@ -75,6 +79,7 @@ class FunctionPodMonitor:
             return True
         return False
 
+    @tracer.start_as_current_span('seed.collect.logs')
     def _collect_container_error_logs(self, pod_name, containers, result):
         logs = {}
         errors = {}
@@ -95,12 +100,16 @@ class FunctionPodMonitor:
                 logs[status.name] = raw.decode('utf-8', errors='replace')
                 remaining -= len(raw)
             except Exception as exc:
+                span = trace.get_current_span()
+                span.record_exception(exc)
+                span.set_status(trace.StatusCode.ERROR, str(exc))
                 errors[status.name] = str(exc)
         if logs:
             result['logs'] = logs
         if errors:
             result['log_errors'] = errors
 
+    @tracer.start_as_current_span('seed.collect.events')
     def _collect_events(self, pod_uid, result):
         try:
             events = self.api.list_namespaced_event(
@@ -110,4 +119,7 @@ class FunctionPodMonitor:
                 for event in events
             ]
         except Exception as exc:
+            span = trace.get_current_span()
+            span.record_exception(exc)
+            span.set_status(trace.StatusCode.ERROR, str(exc))
             result['event_error'] = str(exc)
