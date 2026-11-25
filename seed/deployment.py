@@ -35,7 +35,8 @@ class FunctionDeployer:
                     'ndn.function.name': request['name']}) as span:
                 result = await asyncio.to_thread(self.backend.wait_for_placement_result, request['name'])
                 span.set_attribute('k8s.pod.phase', result.get('phase', 'Unknown'))
-                if result.get('phase') != 'Running' or result.get('logs') or result.get('log_errors'):
+                if (result.get('phase') != 'Running'
+                        or result.get('logs') or result.get('log_errors') or result.get('startup_errors')):
                     reason = result.get('reason') or 'Function startup failed'
                     span.set_status(trace.StatusCode.ERROR, reason)
                     parent_span.set_status(trace.StatusCode.ERROR, reason)
