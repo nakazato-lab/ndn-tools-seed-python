@@ -6,6 +6,14 @@ from opentelemetry import trace
 tracer = trace.get_tracer(__name__)
 
 MAX_LOG_BYTES = 64 * 1024
+CONTAINER_STARTUP_FAILURE_REASONS = frozenset({
+    'ImagePullBackOff',
+    'ErrImageNeverPull',
+    'InvalidImageName',
+    'CreateContainerConfigError',
+    'CreateContainerError',
+    'RunContainerError',
+})
 
 
 class FunctionPodMonitor:
@@ -34,9 +42,9 @@ class FunctionPodMonitor:
                     'message': 'Function Pod was replaced or deleted during startup',
                 }
                 return result
-            containers_with_execution_failure = self.containers_with_execution_failure(pod)
+            has_failure = self.has_container_failure(pod)
             # Pending may be normal startup; wait until the deadline.
-            if (not containers_with_execution_failure
+            if (not has_failure
                     and pod.status.phase == 'Pending' and time.monotonic() < deadline):
                 time.sleep(1)
                 continue
@@ -48,23 +56,33 @@ class FunctionPodMonitor:
             'name': prefix, 'pod_name': pod.metadata.name, 'node_name': self.node_name,
             'phase': pod.status.phase or 'Unknown',
         }
-        containers_with_execution_failure = self.containers_with_execution_failure(pod)
-        if containers_with_execution_failure:
-            self._collect_container_error_logs(pod.metadata.name, containers_with_execution_failure, result)
-        elif pod.status.phase == 'Running':
-            return result
-        else:
+        execution_failures = self.containers_with_execution_failure(pod)
+        startup_failures = self.containers_with_startup_failure(pod)
+        if execution_failures:
+            self._collect_container_error_logs(pod.metadata.name, execution_failures, result)
+        if startup_failures:
+            self._collect_startup_errors(startup_failures, result)
+        if startup_failures or result.get('log_errors') or (not execution_failures and pod.status.phase != 'Running'):
             self._collect_events(pod.metadata.uid, result)
         return result
 
-    def containers_with_execution_failure(self, pod):
+    def _all_container_statuses(self, pod):
         # fields for pod.status: https://github.com/kubernetes-client/python/blob/master/kubernetes/docs/V1PodStatus.md
-        statuses = (pod.status.init_container_statuses or []) + (pod.status.container_statuses or [])
-        containers_with_execution_failure = []
-        for status in statuses:
-            if self._has_container_execution_failure(status):
-                containers_with_execution_failure.append(status)
-        return containers_with_execution_failure
+        if pod.status is None:
+            return []
+        return (pod.status.init_container_statuses or []) + (pod.status.container_statuses or [])
+
+    def has_container_failure(self, pod):
+        return bool(
+            self.containers_with_execution_failure(pod)
+            or self.containers_with_startup_failure(pod)
+        )
+
+    def containers_with_execution_failure(self, pod):
+        return [
+            status for status in self._all_container_statuses(pod)
+            if self._has_container_execution_failure(status)
+        ]
 
     def _has_container_execution_failure(self, status):
         # fields for ContainerStatus: https://github.com/kubernetes-client/python/blob/master/kubernetes/docs/V1ContainerStatus.md
@@ -78,6 +96,31 @@ class FunctionPodMonitor:
         if state.terminated and state.terminated.exit_code != 0:
             return True
         return False
+
+    def containers_with_startup_failure(self, pod):
+        return [
+            status for status in self._all_container_statuses(pod)
+            if self._has_container_startup_failure(status)
+        ]
+
+    def _has_container_startup_failure(self, status):
+        state = status.state
+        if state is None or state.waiting is None:
+            return False
+        # Exclude ContainerCreating, PodInitializing, and transient ErrImagePull.
+        return state.waiting.reason in CONTAINER_STARTUP_FAILURE_REASONS
+
+    def _collect_startup_errors(self, containers, result):
+        startup_errors = {}
+        for status in containers:
+            waiting = status.state.waiting
+            startup_errors[status.name] = {
+                'reason': waiting.reason,
+                'message': waiting.message or '',
+            }
+        if startup_errors:
+            result['startup_errors'] = startup_errors
+            result.setdefault('reason', containers[0].state.waiting.reason)
 
     @tracer.start_as_current_span('seed.collect.logs')
     def _collect_container_error_logs(self, pod_name, containers, result):

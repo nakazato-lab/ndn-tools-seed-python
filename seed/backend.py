@@ -112,6 +112,15 @@ class KubernetesBackend:
             }
         return self.monitor.wait_for_result(prefix, pod, timeout)
 
+    @staticmethod
+    def _is_container_running(pod, container_name):
+        if pod.status is None:
+            return False
+        for status in pod.status.container_statuses or []:
+            if status.name == container_name:
+                return status.state is not None and status.state.running is not None
+        return False
+
     def _upload_package(self, pod_name, code=None, zip_content=None):
         if zip_content is not None:
             request = function_pb2.PackageRequest(zip_content=zip_content)
@@ -120,20 +129,35 @@ class KubernetesBackend:
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
             pod = self.api.read_namespaced_pod(pod_name, self.namespace, _request_timeout=10)
-            if self.monitor.containers_with_execution_failure(pod) or pod.status.phase in ('Failed', 'Succeeded'):
+            if (self.monitor.has_container_failure(pod)
+                    or pod.status.phase in ('Failed', 'Succeeded')
+                    or pod.metadata.deletion_timestamp):
                 return
             address = pod.status.pod_ip
-            if address:
+            if address and self._is_container_running(pod, 'sidecar'):
                 target = f'[{address}]:50052' if ':' in address else f'{address}:50052'
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
                 with grpc.insecure_channel(target) as channel:
+                    try:
+                        grpc.channel_ready_future(channel).result(timeout=min(1.0, remaining))
+                    except grpc.FutureTimeoutError:
+                        continue
                     stub = function_pb2_grpc.FunctionDeploymentStub(channel)
-                    with tracer.start_as_current_span('seed.upload.package', kind=trace.SpanKind.CLIENT,
-                                                     attributes={'k8s.pod.name': pod_name}):
-                        carrier = {}
-                        TraceContextTextMapPropagator().inject(carrier)
-                        stub.UploadPackage(
-                            request, metadata=list(carrier.items()),
-                            timeout=max(0, deadline - time.monotonic()), wait_for_ready=True)
+                    try:
+                        with tracer.start_as_current_span('seed.upload.package', kind=trace.SpanKind.CLIENT,
+                                                         attributes={'k8s.pod.name': pod_name}):
+                            carrier = {}
+                            TraceContextTextMapPropagator().inject(carrier)
+                            stub.UploadPackage(
+                                request, metadata=list(carrier.items()),
+                                timeout=max(0, deadline - time.monotonic()))
+                    except grpc.RpcError as exc:
+                        if exc.code() == grpc.StatusCode.UNAVAILABLE:
+                            time.sleep(min(1.0, max(0, deadline - time.monotonic())))
+                            continue
+                        raise
                 return
             time.sleep(1)
         raise TimeoutError(f'Timed out waiting for function Pod: {pod_name}')
