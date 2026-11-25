@@ -61,8 +61,8 @@ class FunctionPodMonitor:
         if execution_failures:
             self._collect_container_error_logs(pod.metadata.name, execution_failures, result)
         if startup_failures:
-            self._collect_startup_errors(startup_failures, result)
-        if startup_failures or result.get('log_errors') or (not execution_failures and pod.status.phase != 'Running'):
+            self._collect_startup_errors(pod.metadata.uid, startup_failures, result)
+        elif result.get('log_errors') or (not execution_failures and pod.status.phase != 'Running'):
             self._collect_events(pod.metadata.uid, result)
         return result
 
@@ -110,7 +110,7 @@ class FunctionPodMonitor:
         # Exclude ContainerCreating, PodInitializing, and transient ErrImagePull.
         return state.waiting.reason in CONTAINER_STARTUP_FAILURE_REASONS
 
-    def _collect_startup_errors(self, containers, result):
+    def _collect_startup_errors(self, pod_uid, containers, result):
         startup_errors = {}
         for status in containers:
             waiting = status.state.waiting
@@ -121,6 +121,7 @@ class FunctionPodMonitor:
         if startup_errors:
             result['startup_errors'] = startup_errors
             result.setdefault('reason', containers[0].state.waiting.reason)
+        self._collect_events(pod_uid, result)
 
     @tracer.start_as_current_span('seed.collect.logs')
     def _collect_container_error_logs(self, pod_name, containers, result):
